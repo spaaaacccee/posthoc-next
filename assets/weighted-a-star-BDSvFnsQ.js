@@ -1,0 +1,1 @@
+var e=``+new URL(`weighted-a-star-DTPcKcHs.workspace`,import.meta.url).href;export{e as default};
