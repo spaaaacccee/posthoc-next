@@ -124,7 +124,6 @@ function TraceRendererStatusBanner() {
     <StatusBanner
       color={partial ? "warning" : "info"}
       label={partial ? "This is a partial preview, processing" : "Processing"}
-
     />
   );
 }

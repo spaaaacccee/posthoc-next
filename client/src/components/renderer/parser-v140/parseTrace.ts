@@ -9,9 +9,7 @@ import { withWorker } from "workers/workerLanes";
 import { ParseTraceWorkerParameters as ParseTraceWorkerLegacyParameters } from "../parser/ParseTraceSlaveWorker";
 import { ParseTraceWorkerParameters, ParseTraceWorkerReturnType } from "./ParseTraceSlaveWorker";
 
-type AnyTrace =
-  | ParseTraceWorkerParameters["trace"]
-  | ParseTraceWorkerLegacyParameters["trace"];
+type AnyTrace = ParseTraceWorkerParameters["trace"] | ParseTraceWorkerLegacyParameters["trace"];
 
 type WorkerModule = typeof import("./parseTrace.worker");
 type LegacyWorkerModule = typeof import("../parser/parseTrace.worker");

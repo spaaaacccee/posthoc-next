@@ -9,9 +9,7 @@ type WorkerModule = typeof import("./parsePoly.worker");
 // vite-plugin-comlink rewrites `new ComlinkWorker(...)` into a statement ending
 // in `;`, so it MUST sit on its own line (not inside an arrow/expression).
 function spawnWorker() {
-  const worker = new ComlinkWorker<WorkerModule>(
-    new URL("./parsePoly.worker.ts", import.meta.url),
-  );
+  const worker = new ComlinkWorker<WorkerModule>(new URL("./parsePoly.worker.ts", import.meta.url));
   return worker;
 }
 

@@ -9,9 +9,7 @@ type WorkerModule = typeof import("./parseGrid.worker");
 // vite-plugin-comlink rewrites `new ComlinkWorker(...)` into a statement ending
 // in `;`, so it MUST sit on its own line (not inside an arrow/expression).
 function spawnWorker() {
-  const worker = new ComlinkWorker<WorkerModule>(
-    new URL("./parseGrid.worker.ts", import.meta.url),
-  );
+  const worker = new ComlinkWorker<WorkerModule>(new URL("./parseGrid.worker.ts", import.meta.url));
   return worker;
 }
 

@@ -107,7 +107,11 @@ export function useTraceStream({
       produceRef.current((l) => {
         set(l, "source.parsedTrace.stream.frontier", frontier);
         set(l, "source.parsedTrace.stream.complete", complete);
-        set(l, "source.parsedTrace.stream.version", (l?.source?.parsedTrace?.stream?.version ?? 0) + 1);
+        set(
+          l,
+          "source.parsedTrace.stream.version",
+          (l?.source?.parsedTrace?.stream?.version ?? 0) + 1,
+        );
       });
     };
 
@@ -174,7 +178,11 @@ export function useTraceStream({
             // Mark the stream terminal so loading indicators stop — generation
             // has stopped even though the frontier never reached the end.
             set(l, "source.parsedTrace.stream.error", true);
-            set(l, "source.parsedTrace.stream.version", (l?.source?.parsedTrace?.stream?.version ?? 0) + 1);
+            set(
+              l,
+              "source.parsedTrace.stream.version",
+              (l?.source?.parsedTrace?.stream?.version ?? 0) + 1,
+            );
           });
         },
       },

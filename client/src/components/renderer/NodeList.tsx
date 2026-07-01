@@ -53,7 +53,11 @@ export function NodeList({ nodes, start: startProp, end: stepProp }: NodeListPro
  *
  * React tree size is O(1) regardless of event count.
  */
-export function PersistentNodes({ nodes, step: stepProp, chunkSize: chunkSizeProp }: PersistentNodesProps) {
+export function PersistentNodes({
+  nodes,
+  step: stepProp,
+  chunkSize: chunkSizeProp,
+}: PersistentNodesProps) {
   const step = stepProp ?? 0;
   const chunkSize = chunkSizeProp ?? 20;
   const { renderer } = useRendererInstance();

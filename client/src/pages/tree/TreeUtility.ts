@@ -38,9 +38,15 @@ const treeAsync = (
   params: TreeWorkerParameters,
   signal?: AbortSignal,
 ): Promise<TreeWorkerReturnType> =>
-  withWorker("tree", spawnWorker, terminate, (w) => w.parse(params) as Promise<TreeWorkerReturnType>, {
-    signal,
-  });
+  withWorker(
+    "tree",
+    spawnWorker,
+    terminate,
+    (w) => w.parse(params) as Promise<TreeWorkerReturnType>,
+    {
+      signal,
+    },
+  );
 
 type X = "text" | "number" | "boolean" | "mixed";
 

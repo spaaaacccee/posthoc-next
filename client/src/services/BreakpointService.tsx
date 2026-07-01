@@ -45,9 +45,15 @@ const runBreakpoint = (
   params: BreakpointWorkerParameters,
   signal?: AbortSignal,
 ): BreakpointProcessorOutput =>
-  withWorker("breakpoint", spawnWorker, terminate, (w): BreakpointProcessorOutput => w.run(params), {
-    signal,
-  });
+  withWorker(
+    "breakpoint",
+    spawnWorker,
+    terminate,
+    (w): BreakpointProcessorOutput => w.run(params),
+    {
+      signal,
+    },
+  );
 
 export type BreakpointOutput = Awaited<BreakpointProcessorOutput> | { error: string };
 

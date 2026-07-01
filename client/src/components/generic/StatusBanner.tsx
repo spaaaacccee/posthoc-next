@@ -28,7 +28,7 @@ export function StatusBanner({
         position: "absolute",
         zIndex: 5,
         top: (t) => t.spacing(6 + 1),
-        right: t => t.spacing(1),
+        right: (t) => t.spacing(1),
 
         alignItems: "center",
         gap: 1.5,
@@ -45,7 +45,6 @@ export function StatusBanner({
       <Typography variant="body2" sx={{ lineHeight: 1 }}>
         {label}
       </Typography>
-
     </Stack>
   );
 }

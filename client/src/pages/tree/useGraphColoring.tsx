@@ -152,7 +152,12 @@ export function useGraphColoring(
           });
 
           const a = makeEdgeKey(graphId, graphPId);
-          if (isDefined(graphPId) && graph.hasNode(`${graphPId}`) && graph.hasEdge(a) && !isSet[a]) {
+          if (
+            isDefined(graphPId) &&
+            graph.hasNode(`${graphPId}`) &&
+            graph.hasEdge(a) &&
+            !isSet[a]
+          ) {
             setAttributes(graph, a, "edge", {
               forceLabel: step === i,
               color: finalColor,

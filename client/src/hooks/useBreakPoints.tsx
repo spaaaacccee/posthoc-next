@@ -28,7 +28,6 @@ export function useBreakpoint(key?: string) {
   }, [dict]);
 }
 
-
 export function treeToDict(trees: EventTree[] = [], dict: TreeDict = {}): TreeDict {
   for (const tree of trees) {
     for (const event of tree.events) {

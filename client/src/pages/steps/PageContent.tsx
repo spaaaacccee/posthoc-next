@@ -49,7 +49,10 @@ export function PageContent({ layer: key }: { layer?: string }) {
   // video editor showing which frames are rendered. Re-reads on `version`.
   const streamKey = useOne(one, (c) => (c as any)?.source?.parsedTrace?.stream?.streamKey);
   const streamVersion = useOne(one, (c) => (c as any)?.source?.parsedTrace?.stream?.version ?? -1);
-  const streamComplete = useOne(one, (c) => (c as any)?.source?.parsedTrace?.stream?.complete ?? false);
+  const streamComplete = useOne(
+    one,
+    (c) => (c as any)?.source?.parsedTrace?.stream?.complete ?? false,
+  );
   const isUngenerated = useMemo(() => {
     const buffers = getStreamBuffers(streamKey);
     if (!buffers || streamComplete) return () => false;

@@ -27,9 +27,15 @@ export const treeLayoutQuery = ({ key, mode, orientation, step, trace }: TreeLay
     // React Query's `signal` aborts the lease (terminating the worker) if the
     // query is cancelled — e.g. the key changes before this resolves.
     queryFn: ({ signal }): Promise<TreeLayoutWorkerReturnType> =>
-      withWorker("tree", spawnWorker, terminate, (w) => w.parse({ mode, orientation, step, trace }), {
-        signal,
-      }),
+      withWorker(
+        "tree",
+        spawnWorker,
+        terminate,
+        (w) => w.parse({ mode, orientation, step, trace }),
+        {
+          signal,
+        },
+      ),
     enabled: !!key,
     staleTime: Infinity,
   });

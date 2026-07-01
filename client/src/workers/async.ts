@@ -17,9 +17,7 @@ type ParseYamlWorkerModule = typeof import("./parseYaml.worker");
 // arrow/expression) or it produces invalid syntax. Hence these standalone
 // factories rather than inline construction.
 function spawnHashWorker() {
-  const worker = new ComlinkWorker<HashWorkerModule>(
-    new URL("./hash.worker.ts", import.meta.url),
-  );
+  const worker = new ComlinkWorker<HashWorkerModule>(new URL("./hash.worker.ts", import.meta.url));
   return worker;
 }
 
