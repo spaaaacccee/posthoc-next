@@ -10,7 +10,7 @@
     "build": "bunx --bun vite build --emptyOutDir",
     "package": "sh ./package.sh",
     "test": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
