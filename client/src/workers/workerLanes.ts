@@ -1,6 +1,7 @@
 import { Sema } from "async-sema";
 import { clamp } from "es-toolkit/compat";
 import { settings as settingsStore } from "slices/settings";
+import { endpointSymbol } from "vite-plugin-comlink/symbol";
 
 /**
  * Generic worker concurrency limiter.
@@ -28,6 +29,81 @@ export type LaneName =
   | "breakpoint";
 
 const { max, floor } = Math;
+
+/**
+ * Thrown when a leased worker dies out-of-band — i.e. it fires an `error` or
+ * `messageerror` event rather than returning a value or a caught exception.
+ *
+ * This is the failure mode Comlink CANNOT surface on its own: a proxied call
+ * resolves only when the worker posts a matching response, so a worker that
+ * crashes (module-eval throw, WASM `abort()`, OOM kill, `self.close()`, or an
+ * un-cloneable argument/return) would otherwise leave the call pending FOREVER —
+ * and, because the permit is only released in a `finally`, permanently deadlock
+ * the lane. Turning the crash into a rejection lets the `finally` run, freeing
+ * the permit and propagating a real error to the caller / React Query.
+ */
+export class WorkerCrashError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkerCrashError";
+  }
+}
+
+/** Best-effort access to a leased worker's raw endpoint (a `Worker`). */
+function endpointOf(worker: unknown): (Worker & EventTarget) | undefined {
+  const ep = (worker as Record<symbol, unknown>)?.[endpointSymbol];
+  return ep && typeof (ep as EventTarget).addEventListener === "function"
+    ? (ep as Worker & EventTarget)
+    : undefined;
+}
+
+type CrashWatch = {
+  /**
+   * Rejects with a {@link WorkerCrashError} the moment any watched worker emits
+   * `error`/`messageerror`. Never resolves. Pre-handled so that, if it is
+   * disposed before anyone races against it, it does not surface as an
+   * unhandled rejection.
+   */
+  crashed: Promise<never>;
+  /** Detach every listener. Idempotent. */
+  dispose: () => void;
+};
+
+/**
+ * Attach crash listeners to every leased worker that exposes an endpoint.
+ * Workers without an addressable endpoint (non-Comlink leases) are simply not
+ * watched — the `crashed` promise still exists but only reflects the ones we can
+ * observe.
+ */
+function watchCrash(workers: readonly unknown[]): CrashWatch {
+  const cleanups: (() => void)[] = [];
+  const crashed = new Promise<never>((_, reject) => {
+    for (const w of workers) {
+      const ep = endpointOf(w);
+      if (!ep) continue;
+      const onError = (e: Event) =>
+        reject(new WorkerCrashError((e as ErrorEvent).message || "Worker terminated unexpectedly"));
+      const onMessageError = () =>
+        reject(new WorkerCrashError("Worker sent a message that could not be deserialized"));
+      ep.addEventListener("error", onError);
+      ep.addEventListener("messageerror", onMessageError);
+      cleanups.push(() => {
+        ep.removeEventListener("error", onError);
+        ep.removeEventListener("messageerror", onMessageError);
+      });
+    }
+  });
+  // Keep an inert handler so a disposed-before-consumed watch never trips the
+  // global unhandledrejection path; the real consumer still sees the rejection.
+  crashed.catch(() => {});
+  return {
+    crashed,
+    dispose: () => {
+      for (const c of cleanups) c();
+      cleanups.length = 0;
+    },
+  };
+}
 
 /**
  * The preferred worker count, read live from settings. Mirrors `useTraceStream`:
@@ -82,6 +158,13 @@ export type WorkerLease<T> = {
   workers: T[];
   /** Idempotent: terminates every worker and releases every token, 1:1. */
   release: () => void;
+  /**
+   * Rejects with a {@link WorkerCrashError} if any leased worker crashes (fires
+   * `error`/`messageerror`). Never resolves. Race your worker task against this
+   * so a crash becomes a rejection instead of a permanent hang; `release()`
+   * detaches the listeners.
+   */
+  crashed: Promise<never>;
 };
 
 export type LeaseOptions = {
@@ -131,11 +214,13 @@ export async function leaseWorkers<T>(
   const tokens: unknown[] = [];
   const workers: T[] = [];
   let released = false;
+  let watch: CrashWatch | undefined;
 
   const release = () => {
     if (released) return;
     released = true;
     signal?.removeEventListener("abort", release);
+    watch?.dispose();
     for (const w of workers) {
       try {
         terminate(w);
@@ -169,8 +254,9 @@ export async function leaseWorkers<T>(
   }
 
   for (let i = 0; i < tokens.length; i++) workers.push(spawn());
+  watch = watchCrash(workers);
   signal?.addEventListener("abort", release, { once: true });
-  return { workers, release };
+  return { workers, release, crashed: watch.crashed };
 }
 
 /**
@@ -188,7 +274,10 @@ export async function withWorker<T, R>(
   const lease = await leaseWorkers(lane, spawn, terminate, { ...options, min: 1, max: 1 });
   if (!lease) throw new DOMException("Aborted", "AbortError");
   try {
-    return await task(lease.workers[0]);
+    // Race the job against the crash signal: if the worker dies mid-call the
+    // Comlink promise would hang forever, so `lease.crashed` is what turns that
+    // into a rejection (and lets the `finally` free the permit).
+    return await Promise.race([task(lease.workers[0]), lease.crashed]);
   } finally {
     lease.release();
   }

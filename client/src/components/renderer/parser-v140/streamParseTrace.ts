@@ -21,11 +21,22 @@ export type TraceStreamOptions = {
   /** Called once every worker has finished generating all of its frames. */
   onComplete?: () => void;
   onError?: (error: unknown) => void;
+  /**
+   * Stall watchdog: if the fleet goes fully silent for this many ms *after it has
+   * started producing*, treat it as a hung/dead worker and fail via `onError`.
+   *
+   * This is deliberately an IDLE timeout, not a total-duration one: the timer is
+   * armed only once the first batch arrives and is reset by every subsequent
+   * batch, so an arbitrarily long — but live — generation never trips it. Only
+   * genuine silence mid-stream does. Set to 0 to disable.
+   */
+  stallTimeoutMs?: number;
   /** Aborting tears down the lease: cancels the wait, terminates + frees workers. */
   signal: AbortSignal;
 };
 
 const DEFAULT_MARGIN = 64;
+const DEFAULT_STALL_TIMEOUT = 30_000;
 
 const { max, min } = Math;
 
@@ -64,6 +75,7 @@ export function createTraceStream(
     workerCount,
     margin = DEFAULT_MARGIN,
     initialStep = 0,
+    stallTimeoutMs = DEFAULT_STALL_TIMEOUT,
     onBatch,
     onComplete,
     onError,
@@ -77,6 +89,32 @@ export function createTraceStream(
   let workers: ReturnType<typeof spawnWorker>[] = [];
   let latestStep = initialStep;
 
+  // Idle-stall watchdog. Armed on the first batch, reset by every batch, so a
+  // long-but-live generation never trips it — only a fleet that has gone silent
+  // mid-stream. Never armed if disabled or if generation ends first.
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  let onStall: ((reason: unknown) => void) | undefined;
+  const stalled = new Promise<never>((_, reject) => {
+    onStall = reject;
+  });
+  stalled.catch(() => {}); // inert handler; the real consumer is the race below
+  const clearStall = () => {
+    if (stallTimer !== undefined) clearTimeout(stallTimer);
+    stallTimer = undefined;
+  };
+  const kickStall = () => {
+    if (!stallTimeoutMs || signal.aborted) return;
+    clearStall();
+    stallTimer = setTimeout(
+      () => onStall?.(new Error(`Trace generation stalled: no output for ${stallTimeoutMs}ms`)),
+      stallTimeoutMs,
+    );
+  };
+  const onBatchWatched = (frames: StreamBatchFrame[]) => {
+    kickStall(); // reset the idle timer on any sign of life
+    onBatch(frames);
+  };
+
   (async () => {
     const lease = await leaseWorkers("trace-gen", spawnWorker, terminateWorker, {
       workerCount,
@@ -87,16 +125,25 @@ export function createTraceStream(
     if (!lease || signal.aborted) return;
     workers = lease.workers;
     const n = workers.length;
-    Promise.all(
-      workers.map((w, owner) => w.generate(params, owner, n, margin, proxy(onBatch), latestStep)),
-    )
+    const generation = Promise.all(
+      workers.map((w, owner) =>
+        w.generate(params, owner, n, margin, proxy(onBatchWatched), latestStep),
+      ),
+    );
+    // Race generation against a crash (worker `error`/`messageerror`, which
+    // Comlink can't surface) and the idle-stall watchdog — either resolves the
+    // hang that would otherwise leak the whole `trace-gen` lease.
+    Promise.race([generation, lease.crashed, stalled])
       .then(() => {
         if (!signal.aborted) onComplete?.();
       })
       .catch((e) => {
         if (!signal.aborted) onError?.(e);
       })
-      .finally(() => lease.release());
+      .finally(() => {
+        clearStall();
+        lease.release();
+      });
   })();
 
   return {

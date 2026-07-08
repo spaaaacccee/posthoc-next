@@ -34,22 +34,33 @@ const process = async ({ method, params }: Request): Promise<Partial<Response>> 
 
 const queue: (Request | string)[] = [];
 
-onmessage = async (msg: MessageEvent<string | Request>) => {
-  queue.push(msg.data);
-};
+// `requestAnimationFrame` is not defined in a dedicated worker scope, so the old
+// rAF-driven poll loop threw `ReferenceError` at module load — the worker died
+// on startup and every request against it hung forever. This is message-driven
+// instead: process (and drain) the queue only when work arrives, one item at a
+// time to preserve ordering and serialise `init`.
+let draining = false;
 
-async function consume() {
-  const data = queue.shift();
-  if (data) {
-    if (typeof data === "string") {
-      await init(data);
-      postMessage("ready");
-    } else {
-      const { id, ...req } = data;
-      postMessage({ id, jsonrpc: "2.0", ...(await process(req)) });
+async function drain() {
+  if (draining) return;
+  draining = true;
+  try {
+    let data: Request | string | undefined;
+    while ((data = queue.shift()) !== undefined) {
+      if (typeof data === "string") {
+        await init(data);
+        postMessage("ready");
+      } else {
+        const { id, ...req } = data;
+        postMessage({ id, jsonrpc: "2.0", ...(await process(req)) });
+      }
     }
+  } finally {
+    draining = false;
   }
-  requestAnimationFrame(consume);
 }
 
-requestAnimationFrame(consume);
+onmessage = (msg: MessageEvent<string | Request>) => {
+  queue.push(msg.data);
+  drain();
+};

@@ -23,20 +23,28 @@ export function ConnectionsService() {
           if (disabled !== true) {
             notify(`Connecting to ${url}...`);
             const tp = new (getTransport(t))({ url });
-            await tp.connect();
-            const { result, delta } = await timed(() => tp.call("about"));
-            if (result) {
-              notify(`Connected to ${result.name}`);
-              cs = [
-                ...cs,
-                {
-                  ...result,
-                  url,
-                  ping: delta,
-                  transport: () => tp,
-                },
-              ];
-            } else await tp.disconnect();
+            try {
+              // `connect()` now rejects (rather than hanging) if the transport
+              // dies or times out — contain it so one bad solver doesn't abort
+              // connecting to the rest.
+              await tp.connect();
+              const { result, delta } = await timed(() => tp.call("about"));
+              if (result) {
+                notify(`Connected to ${result.name}`);
+                cs = [
+                  ...cs,
+                  {
+                    ...result,
+                    url,
+                    ping: delta,
+                    transport: () => tp,
+                  },
+                ];
+              } else await tp.disconnect();
+            } catch (e) {
+              notify(`Failed to connect to ${url}: ${e instanceof Error ? e.message : e}`);
+              await tp.disconnect().catch(() => {});
+            }
           }
           if (!aborted) slice.connections.set(cs);
         }
