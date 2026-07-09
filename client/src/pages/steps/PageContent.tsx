@@ -31,7 +31,11 @@ export function PageContent({ layer: key }: { layer?: string }) {
   const paper = usePaper();
   const acrylic = useAcrylic();
   const ref = useRef<ListHandle | null>(null);
-  const [scrollerRef, setScrollerRef] = useState<HTMLElement | Window | null>(null);
+  const [ready, setReady] = useState(false);
+
+  // Space reserved above the first row for the floating Playback bar / type
+  // filter. Previously baked into row 0's height; now owned by the list.
+  const headerHeight = pxToInt(spacing(6 + PADDING_TOP));
 
   // Avoid a destructuring default (`state: {...} = {}`) here: it makes
   // babel-plugin-react-compiler bail out of optimizing this whole component.
@@ -121,32 +125,30 @@ export function PageContent({ layer: key }: { layer?: string }) {
   );
 
   useEffect(() => {
-    if (stepToFilteredStep && scrollerRef && ref.current) {
-      const i = stepToFilteredStep(step!);
-      if (playing) {
-        let cancelled = false;
-        const f = (timestamp: DOMHighResTimeStamp) => {
-          if (cancelled || !("scrollTop" in scrollerRef) || isUndefined(step)) return;
-          const { scrollTop } = scrollerRef;
-          const offset = i * ITEM_HEIGHT;
-          ref.current?.scrollTo?.({
-            top: lerp(scrollTop, offset, 0.000001 * timestamp),
-          });
-          requestAnimationFrame(f);
-        };
-        requestAnimationFrame(f);
-        return () => {
-          cancelled = true;
-        };
-      } else {
-        ref.current.scrollToIndex({
-          index: i,
-          behavior: "smooth",
-          offset: -pxToInt(spacing(12 + PADDING_TOP)),
+    if (!stepToFilteredStep || !ready || !ref.current) return;
+    const i = stepToFilteredStep(step!);
+    if (playing) {
+      let cancelled = false;
+      const target = headerHeight + i * ITEM_HEIGHT;
+      const f = (timestamp: DOMHighResTimeStamp) => {
+        if (cancelled || isUndefined(step) || !ref.current) return;
+        const scrollTop = ref.current.getScrollTop();
+        ref.current.scrollTo({
+          top: lerp(scrollTop, target, 0.000001 * timestamp),
         });
-      }
+        requestAnimationFrame(f);
+      };
+      requestAnimationFrame(f);
+      return () => {
+        cancelled = true;
+      };
     }
-  }, [step, ref, scrollerRef, stepToFilteredStep, playing, spacing]);
+    ref.current.scrollToIndex({
+      index: i,
+      behavior: "smooth",
+      offset: -pxToInt(spacing(12 + PADDING_TOP)),
+    });
+  }, [step, ready, stepToFilteredStep, playing, spacing, headerHeight]);
 
   return (
     <>
@@ -155,22 +157,19 @@ export function PageContent({ layer: key }: { layer?: string }) {
           steps.length ? (
             <List
               sx={{ width: "100%", height: "100%" }}
-              listOptions={{
-                scrollerRef: setScrollerRef,
-                ref,
-                defaultItemHeight: ITEM_HEIGHT,
-                overscan: 0,
-                totalCount: steps.length,
-                itemContent: (i) => (
-                  <Item
-                    disabled={isDisabled(i) || isUngenerated(steps[i][1])}
-                    key={i}
-                    index={i}
-                    event={steps[i][1]}
-                    layer={key}
-                  />
-                ),
-              }}
+              count={steps.length}
+              itemHeight={ITEM_HEIGHT}
+              headerHeight={headerHeight}
+              handleRef={ref}
+              onReady={() => setReady(true)}
+              renderItem={(i) => (
+                <Item
+                  disabled={isDisabled(i) || isUngenerated(steps[i][1])}
+                  index={i}
+                  event={steps[i][1]}
+                  layer={key}
+                />
+              )}
             />
           ) : (
             <Placeholder
