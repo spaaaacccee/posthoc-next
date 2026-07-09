@@ -163,6 +163,22 @@ export class SharedEventStore {
  * which the proxy services from the store, so `events.map/filter/find/...` behave
  * correctly (materialising each event transiently rather than all at once).
  */
+/**
+ * Eagerly reconstruct the FULL events array (a real array) from a shared store.
+ *
+ * Prefer this over {@link makeLazyEvents} for consumers that scan every event
+ * (tree builders, breakpoint processors): they materialise all events anyway, so
+ * laziness buys nothing, and a real array avoids the lazy proxy's edge cases
+ * (e.g. `Object.entries`, which needs own-key enumeration). The lazy proxy is for
+ * genuinely partial access (the streaming frame generator).
+ */
+export function readAllEvents(store: SharedEventStore): TraceEvent[] {
+  // eslint-disable-next-line unicorn/no-new-array
+  const out = new Array<TraceEvent>(store.total);
+  for (let i = 0; i < store.total; i++) out[i] = store.get(i)!;
+  return out;
+}
+
 export function makeLazyEvents(store: SharedEventStore): TraceEvent[] {
   const handler: ProxyHandler<TraceEvent[]> = {
     get(_target, prop, receiver) {

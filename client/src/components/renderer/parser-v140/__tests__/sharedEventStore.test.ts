@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { EventContext, TraceEvent } from "protocol";
 import { Trace } from "protocol/Trace-v140";
 import { createFrameGenerator } from "../ParseTraceSlaveWorker";
-import { buildSharedEventStore, makeLazyEvents, SharedEventStore } from "../sharedEventStore";
+import {
+  buildSharedEventStore,
+  makeLazyEvents,
+  readAllEvents,
+  SharedEventStore,
+} from "../sharedEventStore";
 
 const events: TraceEvent[] = [
   { id: 0, type: "a", g: 10 } as TraceEvent,
@@ -32,6 +37,17 @@ describe("SharedEventStore", () => {
     const store = new SharedEventStore(await buildSharedEventStore(events));
     // [no parent, id0@0, id1@1, unseen->0, id0@0]
     expect(Array.from(store.parents)).toEqual([-1, 0, 1, 0, 0]);
+  });
+});
+
+describe("readAllEvents", () => {
+  it("eagerly reconstructs the full events array (real array, deep-equal)", async () => {
+    const store = new SharedEventStore(await buildSharedEventStore(events));
+    const all = readAllEvents(store);
+    expect(Array.isArray(all)).toBe(true);
+    expect(all).toEqual(events);
+    // Real array → own-key enumeration works (the lazy proxy's weak spot).
+    expect(Object.entries(all)).toHaveLength(events.length);
   });
 });
 

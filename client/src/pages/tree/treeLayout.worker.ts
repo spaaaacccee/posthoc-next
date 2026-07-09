@@ -1,6 +1,11 @@
 import { graphlib, layout } from "@dagrejs/dagre";
 import { forEach, pick } from "es-toolkit/compat";
 import { Trace, TraceEvent } from "protocol";
+import {
+  readAllEvents,
+  SharedEventStore,
+  SharedEventStoreHandles,
+} from "components/renderer/parser-v140/sharedEventStore";
 
 export function getFinalParents(trace: Trace | undefined) {
   const finalParent: Record<string, Key> = {};
@@ -22,7 +27,12 @@ export type EventTree = {
 
 export type Key = string | number | null | undefined;
 
-export function parse({ trace, mode, orientation }: TreeWorkerParameters) {
+export function parse({ trace, mode, orientation, store }: TreeWorkerParameters) {
+  // Shared path: reconstruct a lazy events view over the shared bytes instead of
+  // receiving a clone.
+  if (store && trace) {
+    trace = { ...trace, events: readAllEvents(new SharedEventStore(store)) };
+  }
   const g = new graphlib.Graph();
 
   // Set an object for the graph label
@@ -98,6 +108,8 @@ export type TreeWorkerParameters = {
   step?: number;
   mode?: "tree" | "directed-graph";
   orientation?: "horizontal" | "vertical";
+  /** Shared event store handles; when present, `trace.events` is reconstructed from them. */
+  store?: SharedEventStoreHandles;
 };
 
 export type TreeWorkerReturnType =

@@ -8,6 +8,8 @@ import { isEqual } from "es-toolkit";
 import { groupBy, values } from "es-toolkit/compat";
 import { DebugLayerData } from "hooks/useBreakPoints";
 import { useComputeTree } from "pages/tree/TreeUtility";
+import { getSharedEventStoreIfPossible } from "components/renderer/parser-v140/traceEventStore";
+import { SharedEventStoreHandles } from "components/renderer/parser-v140/sharedEventStore";
 import { useEffect, useMemo } from "react";
 import { slice } from "slices";
 import { Layer } from "slices/layers";
@@ -38,6 +40,8 @@ export type BreakpointWorkerParameters = {
   breakpoint: Breakpoint;
   trace: UploadedTrace;
   dict: TreeDict;
+  /** Shared event store handles; when present, `trace.content.events` is reconstructed from them. */
+  store?: SharedEventStoreHandles;
 };
 
 /** Raw, lane-routed, cancellable worker call. */
@@ -83,7 +87,11 @@ export const breakpointQuery = ({
     queryKey: ["compute/breakpoint", key, breakpoint],
     queryFn: async ({ signal }): Promise<BreakpointOutput> => {
       try {
-        return await runBreakpoint({ breakpoint, trace: trace!, dict: dict! }, signal);
+        const store = await getSharedEventStoreIfPossible(key, trace?.content?.events, { signal });
+        const t = store
+          ? ({ ...trace, content: { ...trace!.content, events: undefined } } as UploadedTrace)
+          : trace!;
+        return await runBreakpoint({ breakpoint, trace: t, dict: dict!, store }, signal);
       } catch (e) {
         return { error: `${e}` };
       }

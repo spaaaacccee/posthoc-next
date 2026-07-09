@@ -3,6 +3,11 @@ import { toPairs as entries, find, forEach, groupBy, sumBy, times } from "es-too
 import { arrayToTree } from "performant-array-to-tree";
 import { Trace, TraceEvent } from "protocol";
 import { flow } from "utils/flow";
+import {
+  readAllEvents,
+  SharedEventStore,
+  SharedEventStoreHandles,
+} from "components/renderer/parser-v140/sharedEventStore";
 export type EventTree = {
   id: Key;
   name: string;
@@ -47,7 +52,12 @@ export function degreeSeparation(tree: EventTree, radius: number) {
   return addPathToRoot(pruned);
 }
 
-export function parse({ trace, step = 0, radius }: TreeWorkerParameters) {
+export function parse({ trace, step = 0, radius, store }: TreeWorkerParameters) {
+  // Shared path: the caller passed SAB handles instead of cloning the events;
+  // reconstruct a lazy events view over the shared bytes.
+  if (store && trace) {
+    trace = { ...trace, events: readAllEvents(new SharedEventStore(store)) };
+  }
   function addParents(tree: EventTree) {
     forEach(tree.children, (t) => {
       t.parent = tree;
@@ -114,6 +124,8 @@ export type TreeWorkerParameters = {
   trace?: Trace;
   step?: number;
   radius?: number;
+  /** Shared event store handles; when present, `trace.events` is reconstructed from them. */
+  store?: SharedEventStoreHandles;
 };
 
 export type TreeWorkerReturnType =

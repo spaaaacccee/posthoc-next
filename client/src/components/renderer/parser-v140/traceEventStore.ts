@@ -50,6 +50,51 @@ function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/**
+ * Prepare a worker call so the worker reads events from the shared store instead
+ * of receiving a structured-clone of them. On the shared path returns the trace
+ * with `events` stripped plus the `store` handles (cheap to post — the memory is
+ * shared); otherwise returns the trace unchanged so the worker clones as before.
+ *
+ * The worker side reconstructs `trace.events` from `store` (see e.g.
+ * `treeUtility.worker.ts`). Falls back transparently when SAB is unavailable, the
+ * trace is keyless, or the build fails.
+ */
+export async function withSharedEvents<T extends { events?: readonly TraceEvent[] }>(
+  key: string | undefined,
+  trace: T | undefined,
+  options: { signal?: AbortSignal } = {},
+): Promise<{ trace?: T; store?: SharedEventStoreHandles }> {
+  const store = await getSharedEventStoreIfPossible(key, trace?.events, options);
+  return store && trace ? { trace: { ...trace, events: undefined }, store } : { trace };
+}
+
+/**
+ * Get the shared store for `events` if sharing is possible (SAB available,
+ * cross-origin isolated, a keyed non-empty trace), else `undefined`. Never
+ * throws — a failed build falls back to `undefined` so callers clone as before.
+ * Use this directly when events live somewhere other than a top-level `events`
+ * field (e.g. `UploadedTrace.content.events`); otherwise prefer
+ * {@link withSharedEvents}.
+ */
+export async function getSharedEventStoreIfPossible(
+  key: string | undefined,
+  events: readonly TraceEvent[] | undefined,
+  options: { signal?: AbortSignal } = {},
+): Promise<SharedEventStoreHandles | undefined> {
+  const canShare =
+    !!key &&
+    !!events?.length &&
+    typeof SharedArrayBuffer !== "undefined" &&
+    !!(globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated;
+  if (!canShare) return undefined;
+  try {
+    return await getSharedEventStore(key, events, options);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Peek at an already-built store without triggering a build. */
 export function peekSharedEventStore(key?: string): Promise<SharedEventStoreHandles> | undefined {
   return key ? cache.get(key) : undefined;

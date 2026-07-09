@@ -18,6 +18,7 @@ import { Trace } from "protocol/Trace";
 import { flow } from "utils/flow";
 import { endpointSymbol } from "vite-plugin-comlink/symbol";
 import { withWorker } from "workers/workerLanes";
+import { withSharedEvents } from "components/renderer/parser-v140/traceEventStore";
 import { TreeWorkerParameters, TreeWorkerReturnType } from "./treeUtility.worker";
 import { TraceEvent } from "protocol/Trace-v140";
 
@@ -139,11 +140,18 @@ export function useComputeLabels(options: { key?: string; trace?: Trace }) {
 
 type ComputeTreeOptions = TreeWorkerParameters & { key?: string; enabled?: boolean };
 
-export const computeTreeQuery = ({ key, radius, step, trace, enabled = true }: ComputeTreeOptions) =>
+export const computeTreeQuery = ({
+  key,
+  radius,
+  step,
+  trace,
+  enabled = true,
+}: ComputeTreeOptions) =>
   queryOptions({
     queryKey: ["compute/tree/utility", key, radius, step],
     queryFn: async ({ signal }) => {
-      const tree = await treeAsync({ radius, step, trace }, signal);
+      const shared = await withSharedEvents(key, trace, { signal });
+      const tree = await treeAsync({ radius, step, ...shared }, signal);
       if (tree) {
         const dict = treeToDict(tree?.tree ?? []);
 
