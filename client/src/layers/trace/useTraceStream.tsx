@@ -162,6 +162,7 @@ export function useTraceStream({
       { trace: content, context, view },
       {
         workerCount,
+        traceKey,
         initialStep: step,
         signal,
         onBatch,

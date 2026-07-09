@@ -1,5 +1,6 @@
 import { ComponentEntry } from "renderer";
 import { createFrameGenerator, ParseTraceWorkerParameters } from "./ParseTraceSlaveWorker";
+import { makeLazyEvents, SharedEventStore } from "./sharedEventStore";
 
 /**
  * One streamed frame: the raw, per-event components for a single step. The
@@ -75,8 +76,17 @@ export async function generate(
   const myEpoch = ++epoch;
   currentStep = initialStep;
 
-  const total = params.trace?.events?.length ?? 0;
-  const gen = createFrameGenerator(params);
+  // Shared path: reconstruct a lazy, single-copy event accessor from the SAB
+  // handles instead of reading a cloned `trace.events`. The store's precomputed
+  // `parents` index means no per-worker all-events scan for parent resolution.
+  let genParams = params;
+  let total = params.trace?.events?.length ?? 0;
+  if (params.store) {
+    const store = new SharedEventStore(params.store);
+    genParams = { ...params, events: makeLazyEvents(store), parents: store.parents };
+    total = store.total;
+  }
+  const gen = createFrameGenerator(genParams);
   const done = new Uint8Array(total);
   let cursor = nextOwned(0, owner, n); // monotonic contiguous frontier (mine)
 

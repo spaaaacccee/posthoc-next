@@ -21,7 +21,12 @@ export const defaultGuard = ((l) => !!l) as LayerGuard<never>;
 
 export const layers = store<Layer[]>([], {
   name: "layers",
-  devtools: { enabled: import.meta.env.DEV },
+  // Redux-DevTools serialises the WHOLE store state on every action. This store
+  // holds parsed trace content (100k+ events), which the extension cannot
+  // serialise without hanging the main thread ("payloads are too large" →
+  // RESULT_CODE_HUNG). Disabled here; re-enable once trace content lives outside
+  // the reactive store.
+  devtools: { enabled: false },
 }).extend((store) => {
   return {
     one: createSelector(store),

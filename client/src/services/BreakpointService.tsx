@@ -99,16 +99,23 @@ export function BreakpointService({ value }: { value?: string }) {
 
   const inputs = useOne(one, (l) => l?.source?.breakpoints, isEqual);
 
+  const breakpoints = useMemo(() => inputs ?? [], [inputs]);
+
+  // The tree/dict is only consumed to evaluate breakpoints, and building it
+  // clones the whole trace to a worker (a multi-second main-thread serialize on
+  // large traces — it fires on plain import via the always-mounted
+  // BreakpointService). Skip it entirely unless a breakpoint is actually active.
+  const needsTree = useMemo(() => breakpoints.some((b) => b.active), [breakpoints]);
+
   const { data } = useComputeTree({
     key: trace?.key,
     trace: trace?.content,
     step: trace?.content?.events?.length,
     radius: undefined,
+    enabled: needsTree,
   });
   const { dict } = data ?? {};
   const ready = !!data && !!trace?.key;
-
-  const breakpoints = useMemo(() => inputs ?? [], [inputs]);
 
   // One query per breakpoint; active ones run, inactive ones stay disabled.
   const results = useQueries({

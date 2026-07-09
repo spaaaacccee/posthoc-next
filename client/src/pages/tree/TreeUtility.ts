@@ -137,9 +137,9 @@ export function useComputeLabels(options: { key?: string; trace?: Trace }) {
   return useQuery(computeLabelsQuery(options));
 }
 
-type ComputeTreeOptions = TreeWorkerParameters & { key?: string };
+type ComputeTreeOptions = TreeWorkerParameters & { key?: string; enabled?: boolean };
 
-export const computeTreeQuery = ({ key, radius, step, trace }: ComputeTreeOptions) =>
+export const computeTreeQuery = ({ key, radius, step, trace, enabled = true }: ComputeTreeOptions) =>
   queryOptions({
     queryKey: ["compute/tree/utility", key, radius, step],
     queryFn: async ({ signal }) => {
@@ -150,7 +150,10 @@ export const computeTreeQuery = ({ key, radius, step, trace }: ComputeTreeOption
         return { dict, ...tree };
       }
     },
-    enabled: !!key,
+    // Building the tree clones the whole trace to a worker (a heavy main-thread
+    // serialize for large traces), so callers that don't need it — e.g. a trace
+    // with no active breakpoints — should pass `enabled: false` to skip it.
+    enabled: enabled && !!key,
     staleTime: Infinity,
   });
 

@@ -5,6 +5,7 @@ import { ComponentEntry } from "renderer";
 import { flow } from "utils/flow";
 import { normalizeConstant } from "./normalize";
 import { parse as parseComponents } from "./parse";
+import type { SharedEventStoreHandles } from "./sharedEventStore";
 
 type C = CompiledComponent<string, Record<string, unknown>>;
 const isNullish = (x: KeyRef): x is Exclude<KeyRef, Key> => x === undefined || x === null;
@@ -46,14 +47,32 @@ export function createFrameGenerator({
   trace,
   context,
   view = "main",
+  events: injectedEvents,
+  parents,
 }: ParseTraceWorkerParameters): (i: number) => SingleFrame {
   const parsed = parseComponents(trace?.views?.[view] ?? [], trace?.views ?? {});
-  const events = trace?.events ?? [];
-  const byId = flow(
-    events,
-    (r) => r.map((c, i) => ({ step: i, id: c.id, data: c, pId: c.pId })),
-    (r) => groupBy(r, "id"),
-  );
+  const events = injectedEvents ?? trace?.events ?? [];
+  // Parent resolution has two backends: a precomputed `parents` index (the SAB
+  // streaming path — one lazy lookup, no all-events scan) or the original
+  // `byId` + `findLast(step <= i)` fold (the plain one-shot path). The `byId`
+  // branch is only built when there is no precomputed index, so it never forces
+  // a lazy event accessor to materialise every event.
+  const resolveParent = parents
+    ? (i: number) => {
+        const p = parents[i]!;
+        return p < 0 ? undefined : events[p];
+      }
+    : (() => {
+        const byId = flow(
+          events,
+          (r) => r.map((c, i) => ({ step: i, id: c.id, data: c, pId: c.pId })),
+          (r) => groupBy(r, "id"),
+        );
+        return (i: number, e: TraceEvent) =>
+          !isNullish(e.pId)
+            ? events[findLast(byId[e.pId], (x) => x.step <= i)?.step ?? 0]
+            : undefined;
+      })();
   const makeEntryIteratee = (step: number) => (component: C) => ({
     component,
     meta: { source: "trace", step, info: component.$info },
@@ -69,9 +88,7 @@ export function createFrameGenerator({
             __internal__: {
               context,
               step: i,
-              parent: !isNullish(e.pId)
-                ? events[findLast(byId[e.pId], (x) => x.step <= i)?.step ?? 0]
-                : undefined,
+              parent: resolveParent(i, e),
               events,
               event: e,
             },
@@ -103,6 +120,20 @@ export type ParseTraceWorkerParameters = {
   view?: string;
   from?: number;
   to?: number;
+  /**
+   * Injected event accessor (SAB streaming path). Overrides `trace.events` — a
+   * lazy, single-shared-copy view (see `makeLazyEvents`) so the fleet doesn't
+   * each clone the full list. Omit for the plain path (uses `trace.events`).
+   */
+  events?: TraceEvent[];
+  /** Precomputed parent step per event (SAB path); `-1` means no parent. */
+  parents?: Int32Array;
+  /**
+   * Shared event buffers passed over the wire to a streaming worker, which
+   * reconstructs `events`/`parents` from them. Cheap to clone: the backing
+   * memory is shared, not copied.
+   */
+  store?: SharedEventStoreHandles;
 };
 
 export type ParseTraceWorkerReturnType = {

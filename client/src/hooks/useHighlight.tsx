@@ -3,7 +3,7 @@ import { makePathIndex, Node } from "layers/trace/makePathIndex";
 import { TraceLayerData } from "layers/trace/TraceLayer";
 import { isUndefined, noop } from "es-toolkit";
 import { find, findLastIndex, forEach, forOwn, groupBy, keys } from "es-toolkit/compat";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { slice } from "slices";
 import { Layer } from "slices/layers";
 import { AccentColor } from "theme";
@@ -90,7 +90,9 @@ export function useHighlightNodes(key?: string): {
     [trace, setLayer],
   );
 
-  const groupedTraceById = index(trace?.events, "index");
+  // Indexing every event is O(events); memoize so it only rebuilds when the
+  // trace changes rather than on every render (these feed the highlight handlers).
+  const groupedTraceById = useMemo(() => index(trace?.events, "index"), [trace?.events]);
 
   const getPrecedentEvents = (root: Node, visited = new Set<number | string>()) => {
     if (visited.has(root.step)) {
@@ -148,7 +150,10 @@ export function useHighlightNodes(key?: string): {
     [trace, setLayer],
   );
 
-  const groupedTraceBypId = index(trace?.events, "index", "pId");
+  const groupedTraceBypId = useMemo(
+    () => index(trace?.events, "index", "pId"),
+    [trace?.events],
+  );
 
   const getAllSubtreeNodes = (root: Node, visited = new Set<number | string>()): Subtree => {
     if (visited.has(root.id)) {

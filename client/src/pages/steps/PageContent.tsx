@@ -9,8 +9,7 @@ import { flattenSubtree } from "hooks/useHighlight";
 import { computed } from "hooks/usePlaybackState";
 import { inferLayerName } from "layers/inferLayerName";
 import { getController } from "layers/layerControllers";
-import { isEqual, isUndefined, uniq } from "es-toolkit";
-import { filter, findIndex, reduce, sortBy } from "es-toolkit/compat";
+import { isEqual, isUndefined } from "es-toolkit";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { slice } from "slices";
 import { WithLayer } from "slices/layers";
@@ -24,7 +23,6 @@ import { StepsLayer } from "./StepsLayer";
 import { StepsPageState } from "./StepsPageState";
 import { Item } from "./Item";
 import { getStreamBuffers } from "layers/trace/traceStreamStore";
-import { flow } from "utils/flow";
 import { result } from "utils/result";
 import { useOne } from "slices/useOne";
 
@@ -72,14 +70,12 @@ export function PageContent({ layer: key }: { layer?: string }) {
       result(() => {
         if (rawSteps) {
           const steps = rawSteps.map((a, b) => [a, b] as const);
-          const stepTypes = flow(
-            steps,
-            (s) => s.map(([e]) => e?.type),
-            (s) => filter(s),
-            uniq,
-          );
+          // Distinct event types (single pass) for the type filter. Avoids the
+          // prior map->filter->uniq chain over every event.
+          const stepTypes = new Set<string>();
+          for (const e of rawSteps) if (e?.type) stepTypes.add(e.type);
 
-          const allSelected = !stepTypes.includes(_selectedType);
+          const allSelected = !stepTypes.has(_selectedType);
 
           const path = highlighting?.path;
 
@@ -87,30 +83,35 @@ export function PageContent({ layer: key }: { layer?: string }) {
 
           const highlightedSet = new Set(highlighted);
 
-          const filtered = sortBy(
-            showHighlighting
-              ? steps.filter(([, step]) => highlightedSet.has(step))
-              : allSelected
-                ? steps
-                : steps.filter(([a]) => a.type === _selectedType),
-            ([, step]) => step,
-          );
+          // `steps` is ordered by step index and `filter` preserves order, so the
+          // result is already sorted — no `sortBy` (it was an O(n log n) + full
+          // copy over every event, the main cause of the Events-panel freeze on
+          // large traces).
+          const filtered = showHighlighting
+            ? steps.filter(([, step]) => highlightedSet.has(step))
+            : allSelected
+              ? steps
+              : steps.filter(([a]) => a.type === _selectedType);
 
-          const { stepMap } = reduce(
-            steps,
-            (prev, [, i]) => {
-              const j = findIndex(filtered, ([, j]) => j >= i, prev.from);
-              const k = j === -1 ? filtered.length : j;
-              prev.from = k;
-              prev.stepMap.push(k);
-              return prev;
-            },
-            { from: 0, stepMap: [] as number[] },
-          );
+          // Map an original step to its row in `filtered` lazily via binary search
+          // (filtered is sorted by step) instead of precomputing an O(events) map.
+          const stepToFilteredStep =
+            filtered === steps
+              ? (i: number) => i
+              : (i: number) => {
+                  let lo = 0;
+                  let hi = filtered.length;
+                  while (lo < hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (filtered[mid]![1] >= i) hi = mid;
+                    else lo = mid + 1;
+                  }
+                  return lo;
+                };
 
           return {
             steps: filtered,
-            stepToFilteredStep: (i: number) => stepMap[i],
+            stepToFilteredStep,
             isDisabled: (i: number) => (isHighlighting ? !highlightedSet.has(i) : false),
           };
         }

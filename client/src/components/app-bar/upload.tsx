@@ -49,6 +49,12 @@ export function readUploadedTrace(f: File) {
         });
         cast<Trace | undefined>(parsed);
         if (error) throw error;
+        // Shallow-freeze the parsed trace so immer's auto-freeze treats it as an
+        // opaque leaf: `freeze()` early-returns on an already-frozen object and
+        // never recurses, so committing this (huge) event graph to the layers
+        // store no longer deep-freezes all ~700k events on the main thread. O(1)
+        // (freezes only the top object); the events stay mutable and readable.
+        if (parsed) Object.freeze(parsed);
         return {
           ...custom(),
           content: parsed,

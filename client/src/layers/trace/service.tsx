@@ -71,6 +71,12 @@ export const service = withProduce(({ value, produce }) => {
   });
   useEffect(() => {
     if (parsedTrace) {
+      // One-shot path: `parsedTrace` holds the full `content` plus per-event
+      // `components` arrays. Shallow-freeze it so immer's auto-freeze treats it as
+      // an opaque leaf (freeze() early-returns on a frozen object) instead of
+      // deep-freezing every event/component on commit — the same trick used for
+      // `content` on import. This result is committed once and never mutated.
+      Object.freeze(parsedTrace);
       produce((l) => {
         set(l, "source.parsedTrace", parsedTrace);
         set(l, "viewKey", nanoid());

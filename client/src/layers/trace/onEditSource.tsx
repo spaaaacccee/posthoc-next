@@ -10,6 +10,9 @@ export const onEditSource = (async (layer, id, content) => {
 
   const { result, error } = await parseYamlAsync({ content });
   if (error) throw { error };
+  // Shallow-freeze so immer's auto-freeze skips this (large) graph instead of
+  // deep-freezing every event on commit (see upload.tsx / readUploadedTrace).
+  if (result) Object.freeze(result);
   // Set the trace content
   set(layer, "source.trace.content", result as Trace | undefined);
   // To get things to change, we also need to change the trace key
