@@ -52,7 +52,12 @@ class Tile extends PIXI.Sprite {
   }
 }
 
-type Layer = { store: SharedComponentStore; index?: SharedArrayBuffer; params?: LayerParams };
+type Layer = {
+  store: SharedComponentStore;
+  index?: SharedArrayBuffer;
+  fb?: Flatbush;
+  params: LayerParams;
+};
 
 /**
  * Main-thread half of the v2 renderer. Owns the PIXI viewport + tile sprites and
@@ -72,9 +77,7 @@ export class D2RendererV2 extends D2RendererBase {
   #workers: D2RendererV2WorkerAdapter[] = [];
   #step = 0;
 
-  // First slice: a single trace layer. (P7 generalises to a per-layer list.)
   #layers = new Map<SourceHandle, Layer>();
-  #main?: { store: SharedComponentStore; fb: Flatbush };
 
   protected override setupPixi(o: D2RendererOptions) {
     super.setupPixi(o);
@@ -104,12 +107,13 @@ export class D2RendererV2 extends D2RendererBase {
     return () => {};
   }
 
-  load(store: SharedComponentStore, params?: LayerParams): SourceHandle {
+  load(store: SharedComponentStore, params: LayerParams = {}): SourceHandle {
     const id = nanoid();
     const { index } = buildIndexedGeneration(store);
-    this.#layers.set(id, { store, index, params });
-    this.#main = index ? { store, fb: openIndex(index) } : undefined;
-    this.#workers.forEach((w) => w.call("setGeneration", [{ store, index, generation: store.generation }]));
+    this.#layers.set(id, { store, index, fb: index ? openIndex(index) : undefined, params });
+    this.#workers.forEach((w) =>
+      w.call("setLayer", [id, { store, index, generation: store.generation }, params]),
+    );
     this.#resolved = {};
     // Push the current frustum + step so freshly-loaded workers render the
     // visible region immediately instead of their default 256² frustum.
@@ -120,8 +124,7 @@ export class D2RendererV2 extends D2RendererBase {
 
   unload(handle: SourceHandle): void {
     this.#layers.delete(handle);
-    this.#main = undefined;
-    this.#workers.forEach((w) => w.call("setGeneration", [undefined]));
+    this.#workers.forEach((w) => w.call("removeLayer", [handle]));
     this.#resolved = {};
   }
 
@@ -133,8 +136,9 @@ export class D2RendererV2 extends D2RendererBase {
 
   setLayerParams(handle: SourceHandle, params: LayerParams): void {
     const layer = this.#layers.get(handle);
-    if (layer) layer.params = { ...layer.params, ...params };
-    // Compositing application is P7; membership/visibility are unaffected.
+    if (!layer) return;
+    layer.params = { ...layer.params, ...params };
+    this.#workers.forEach((w) => w.call("setLayerParams", [handle, params]));
   }
 
   #handleWorkerChange(options: D2RendererOptions) {
@@ -234,21 +238,19 @@ export class D2RendererV2 extends D2RendererBase {
   }
 
   #updateHover(e: PIXI.FederatedPointerEvent) {
-    if (!this.#main || !this.viewport || !this.overlay) return;
+    if (!this.viewport || !this.overlay || !this.#layers.size) return;
     const { accentColor } = this.options;
     const px = this.getPx();
     const { x, y } = this.viewport.toWorld(e.globalX, e.globalY);
-    const hits = queryVisible(
-      this.#main.store,
-      this.#main.fb,
-      { left: x, top: y, right: x + Number.MIN_VALUE, bottom: y + Number.MIN_VALUE },
-      this.#step,
-    );
+    const point = { left: x, top: y, right: x + Number.MIN_VALUE, bottom: y + Number.MIN_VALUE };
     this.overlay.clear();
-    for (const i of hits) {
-      const [minX, minY, maxX, maxY] = bodyBounds(this.#main.store, i);
-      this.overlay.lineStyle(2 * px, accentColor, 0.5);
-      this.overlay.drawRect(minX, minY, maxX - minX, maxY - minY);
+    this.overlay.lineStyle(2 * px, accentColor, 0.5);
+    for (const layer of this.#layers.values()) {
+      if (!layer.fb) continue;
+      for (const i of queryVisible(layer.store, layer.fb, point, this.#step)) {
+        const [minX, minY, maxX, maxY] = bodyBounds(layer.store, i);
+        this.overlay.drawRect(minX, minY, maxX - minX, maxY - minY);
+      }
     }
   }
 }

@@ -137,7 +137,7 @@ function LegacyRenderer({ layer, index }: RendererProps) {
  * visibility with `setStep`. Streaming preview is deliberately second-class:
  * nothing renders until the (off-main) build completes.
  */
-function LoadRenderer({ layer }: RendererProps) {
+function LoadRenderer({ layer, index }: RendererProps) {
   const { renderer } = useRendererInstance();
   const context = useEventContext();
   const { result: trace } = useTraceContent(layer?.source?.trace);
@@ -149,10 +149,23 @@ function LoadRenderer({ layer }: RendererProps) {
   stepRef.current = step;
   const contextKey = JSON.stringify(context ?? {});
 
+  // Compositing params (order/alpha/blend), mirroring the streaming path's
+  // `metaFor`. Updating these is free — no store rebuild.
+  const params = useMemo(
+    () => ({
+      index,
+      alpha: 1 - 0.01 * Number(layer?.transparency ?? 0),
+      displayMode: (layer?.displayMode ?? "source-over") as GlobalCompositeOperation,
+    }),
+    [index, layer?.transparency, layer?.displayMode],
+  );
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
+  const handleRef = useRef<SourceHandle | undefined>(undefined);
+
   useEffect(() => {
     if (!renderer?.load || !content?.events?.length) return;
     const controller = new AbortController();
-    let handle: SourceHandle | undefined;
     (async () => {
       const store = await buildComponentStore({
         trace: content,
@@ -162,15 +175,21 @@ function LoadRenderer({ layer }: RendererProps) {
         signal: controller.signal,
       });
       if (controller.signal.aborted || !store || !renderer.load) return;
-      handle = renderer.load(store);
+      handleRef.current = renderer.load(store, paramsRef.current);
       renderer.setStep?.(stepRef.current);
     })();
     return () => {
       controller.abort();
-      if (handle) renderer.unload?.(handle);
+      if (handleRef.current) renderer.unload?.(handleRef.current);
+      handleRef.current = undefined;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderer, content, contextKey, traceKey]);
+
+  // Free compositing updates on the already-loaded layer.
+  useEffect(() => {
+    if (handleRef.current) renderer?.setLayerParams?.(handleRef.current, params);
+  }, [renderer, params]);
 
   useEffect(() => {
     renderer?.setStep?.(step);

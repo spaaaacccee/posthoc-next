@@ -1,6 +1,6 @@
 import { once, throttle } from "es-toolkit/compat";
 import type { Bounds, Point, Size } from "protocol";
-import type { SharedComponentStore } from "renderer";
+import type { LayerParams, SharedComponentStore } from "renderer";
 import type Flatbush from "flatbush";
 import { columnarDrawTransform, drawBody } from "./columnarDraw";
 import { openIndex, queryVisible } from "./columnarIndex";
@@ -32,16 +32,24 @@ export type Generation = {
   generation: number;
 };
 
-type OpenGeneration = Generation & { fb?: Flatbush; colors: Map<number, string> };
+type OpenLayer = Generation & {
+  fb?: Flatbush;
+  colors: Map<number, string>;
+  params: LayerParams;
+};
 
 const MAX_TILE_CACHE = 512;
 
 /**
- * v2 render worker. Holds one *immutable generation* (columnar store + shared
- * Flatbush) and rasterizes the tiles it owns. Visibility is decoupled: a tile's
- * content = spatial hits ∩ `start <= step < end`. Swapping generations is a
- * single reference assignment in a message handler, so it is atomic w.r.t. an
- * in-flight (synchronous) tile render — no torn read, no lock needed.
+ * v2 render worker. Holds a set of *immutable layers* (each a columnar store +
+ * shared Flatbush + compositing params) keyed by a handle, and rasterizes the
+ * tiles it owns. Per tile, layers are drawn in `params.index` order onto their
+ * own sub-canvas and composited (alpha + displayMode) — so toggling a layer or
+ * changing its opacity is a param update, never a rebuild. Visibility is
+ * decoupled: a layer's tile content = spatial hits ∩ `start <= step < end`.
+ *
+ * Swapping a layer is a single Map write in a message handler, atomic w.r.t. an
+ * in-flight synchronous tile render — no torn read, no lock; disposal is a delete.
  */
 export class D2RendererV2Worker extends EventEmitter<
   D2RendererEvents & {
@@ -50,11 +58,10 @@ export class D2RendererV2Worker extends EventEmitter<
 > {
   #options: D2RendererOptions = defaultD2RendererOptions;
   #frustum: Bounds = { bottom: 256, top: 0, left: 0, right: 256 };
-  #gen?: OpenGeneration;
+  #layers = new Map<string, OpenLayer>();
   #step = 0;
   #now = 0;
 
-  // Tile cache: tileKey -> {hash, tile size}. Insertion-ordered for LRU.
   #cache = new Map<string, { hash: string; width: number; height: number }>();
 
   setup(options: D2RendererOptions) {
@@ -80,13 +87,33 @@ export class D2RendererV2Worker extends EventEmitter<
     this.#invalidate();
   }
 
-  /** Swap in a new generation (or clear with `undefined`). Old gen is dropped. */
-  setGeneration(gen?: Generation) {
-    this.#gen = gen
-      ? { ...gen, fb: gen.index ? openIndex(gen.index) : undefined, colors: new Map() }
-      : undefined;
+  /** Add or replace a layer's generation. */
+  setLayer(handle: string, gen: Generation, params: LayerParams = {}) {
+    this.#layers.set(handle, {
+      ...gen,
+      fb: gen.index ? openIndex(gen.index) : undefined,
+      colors: new Map(),
+      params,
+    });
     this.#cache.clear();
     this.#now++;
+    this.#invalidate();
+  }
+
+  removeLayer(handle: string) {
+    if (this.#layers.delete(handle)) {
+      this.#cache.clear();
+      this.#now++;
+      this.#invalidate();
+    }
+  }
+
+  /** Update a layer's compositing params (order/alpha/displayMode) — no rebuild. */
+  setLayerParams(handle: string, params: LayerParams) {
+    const layer = this.#layers.get(handle);
+    if (!layer) return;
+    layer.params = { ...layer.params, ...params };
+    this.#cache.clear();
     this.#invalidate();
   }
 
@@ -110,18 +137,23 @@ export class D2RendererV2Worker extends EventEmitter<
     this.#cache.delete(tileKey);
     this.#cache.set(tileKey, value);
     if (this.#cache.size > MAX_TILE_CACHE) {
-      // Evict least-recently-used (front of insertion order).
       const oldest = this.#cache.keys().next().value;
       if (oldest !== undefined) this.#cache.delete(oldest);
     }
   }
 
+  /** Layers with a built index, in draw order (higher `index` on top). */
+  #orderedLayers() {
+    return [...this.#layers.values()]
+      .filter((l) => l.fb)
+      .sort((a, b) => (a.params.index ?? 0) - (b.params.index ?? 0));
+  }
+
   render() {
-    const gen = this.#gen;
-    if (!gen?.fb) return;
+    if (!this.#orderedLayers().length) return;
     for (const { tile, bounds } of getTiles(this.#frustum, this.#options.tileSubdivision).tiles) {
       if (this.#shouldRender(tile)) {
-        const out = this.#renderTile(gen, bounds, this.#options.tileResolution);
+        const out = this.#renderTile(bounds, this.#options.tileResolution);
         if (out) {
           this.emit(
             "message",
@@ -133,27 +165,26 @@ export class D2RendererV2Worker extends EventEmitter<
     }
   }
 
-  #renderTile(
-    gen: OpenGeneration,
-    bounds: Bounds,
-    tile: Size,
-  ): { hash: string; bitmap?: ImageBitmap } | undefined {
-    const { store, fb } = gen;
-    if (!fb) return undefined;
+  #renderTile(bounds: Bounds, tile: Size): { hash: string; bitmap?: ImageBitmap } | undefined {
+    const layers = this.#orderedLayers();
+    if (!layers.length) return undefined;
     const { top, right, bottom, left } = bounds;
 
-    const indices = queryVisible(store, fb, { top, left, right, bottom }, this.#step);
-    // Content key is generation + the visible body indices: correct under any
-    // visibility state and dedups identical tiles across steps.
-    const nextHash = hash([gen.generation, ...indices]);
+    // Visible bodies per layer + a content hash over (generation, visible ids).
+    // A sentinel (-1) separates layers so distinct splits can't collide.
+    const perLayer = layers.map((l) => ({
+      l,
+      indices: queryVisible(l.store, l.fb!, { top, left, right, bottom }, this.#step),
+    }));
+    const hashInput: number[] = [];
+    for (const { l, indices } of perLayer) {
+      hashInput.push(-1, l.generation, indices.length, ...indices);
+    }
+    const nextHash = hash(hashInput);
     const tileKey = hash([top, right, bottom, left, tile.width, tile.height]);
 
     const prev = this.#cache.get(tileKey);
-    if (
-      prev &&
-      prev.hash === nextHash &&
-      prev.width + prev.height >= tile.width + tile.height
-    ) {
+    if (prev && prev.hash === nextHash && prev.width + prev.height >= tile.width + tile.height) {
       return { hash: prev.hash };
     }
 
@@ -164,7 +195,19 @@ export class D2RendererV2Worker extends EventEmitter<
     ctx.fillRect(0, 0, tile.width, tile.height);
 
     const t = columnarDrawTransform(bounds, tile);
-    for (const i of indices) drawBody(store, i, ctx, t, gen.colors);
+    for (const { l, indices } of perLayer) {
+      if (!indices.length) continue;
+      // Each layer paints onto its own sub-canvas, then composites with its
+      // alpha + blend mode (matching v1's per-source-layer compositing).
+      const g2 = new OffscreenCanvas(tile.width, tile.height);
+      const ctx2 = g2.getContext("2d")!;
+      for (const i of indices) drawBody(l.store, i, ctx2, t, l.colors);
+      ctx.globalAlpha = l.params.alpha ?? 1;
+      ctx.globalCompositeOperation = l.params.displayMode ?? "source-over";
+      ctx.drawImage(g2, 0, 0);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
 
     const bitmap = g.transferToImageBitmap();
     this.#touch(tileKey, { hash: nextHash, width: bitmap.width, height: bitmap.height });
@@ -177,5 +220,4 @@ export class D2RendererV2Worker extends EventEmitter<
   }
 }
 
-// Re-exported so the main thread can build the same tile grid if needed.
 export { getTiles };
