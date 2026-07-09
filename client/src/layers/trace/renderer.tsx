@@ -156,8 +156,9 @@ function LoadRenderer({ layer, index }: RendererProps) {
       index,
       alpha: 1 - 0.01 * Number(layer?.transparency ?? 0),
       displayMode: (layer?.displayMode ?? "source-over") as GlobalCompositeOperation,
+      sourceLayer: layer?.key,
     }),
-    [index, layer?.transparency, layer?.displayMode],
+    [index, layer?.transparency, layer?.displayMode, layer?.key],
   );
   const paramsRef = useRef(params);
   paramsRef.current = params;

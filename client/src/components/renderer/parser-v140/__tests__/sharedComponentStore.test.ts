@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { TraceEvent } from "protocol";
 import type { ComponentEntry } from "renderer";
 import { SingleFrame } from "../ParseTraceSlaveWorker";
-import { buildSharedComponentStore } from "../sharedComponentStore";
+import {
+  buildSharedComponentStore,
+  buildStaticComponentStore,
+  STATIC_END,
+} from "../sharedComponentStore";
 
 /**
  * Isolates the packing + span logic from view compilation by handing
@@ -153,5 +157,54 @@ describe("buildSharedComponentStore ragged points (path/polygon)", () => {
     expect(Array.from(store.ptOff)).toEqual([0, 3, 5, 5]); // 3 + 2 + 0 points
     expect(Array.from(store.pts)).toEqual([0, 0, 10, 0, 5, 8, 100, 100, 120, 140]);
     expect(store.size[1]).toBe(3); // path line width
+  });
+});
+
+describe("buildSharedComponentStore text", () => {
+  it("packs a text body: anchor + font size, interned label + colour, alpha 1", () => {
+    const gen = (i: number): SingleFrame =>
+      ({
+        event: { id: i, type: "e" } as TraceEvent,
+        components: {
+          persistent:
+            i === 0
+              ? [
+                  entry({
+                    $: "text",
+                    x: 50,
+                    y: 60,
+                    label: "hi",
+                    "label-size": 10,
+                    "label-color": "cyan",
+                  }),
+                ]
+              : [],
+          transient: [],
+          special: [],
+        },
+      }) as SingleFrame;
+    const store = buildSharedComponentStore({ gen, total: 1 });
+    expect(store.kind[0]).toBe(4); // text
+    expect([store.x[0], store.y[0]]).toEqual([50, 60]);
+    expect(store.size[0]).toBe(10);
+    expect(store.strings[store.label[0]!]).toBe("hi");
+    expect(store.palette[store.fill[0]!]).toBe("cyan");
+    expect(store.alpha[0]).toBe(1);
+  });
+});
+
+describe("buildStaticComponentStore (maps)", () => {
+  it("packs a flat component list with always-visible spans", () => {
+    const nodes = [
+      entry({ $: "rect", x: 0, y: 0, width: 1, height: 1, fill: "red" }),
+      entry({ $: "circle", x: 5, y: 5, radius: 2, fill: "blue" }),
+    ];
+    const store = buildStaticComponentStore(nodes);
+    expect(store.count).toBe(2);
+    expect(store.total).toBe(1);
+    expect(Array.from(store.start)).toEqual([0, 0]);
+    expect(Array.from(store.end)).toEqual([STATIC_END, STATIC_END]);
+    // Visible at any step regardless of the global playhead.
+    expect(store.start[0]! <= 999 && 999 < store.end[0]!).toBe(true);
   });
 });

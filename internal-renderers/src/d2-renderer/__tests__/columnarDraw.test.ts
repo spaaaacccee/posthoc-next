@@ -32,6 +32,8 @@ function makeStore(): SharedComponentStore {
     end: i32([10, 6]),
     fill: i32([1, 2]),
     palette: ["", "red", "blue"],
+    label: i32([0, 0]),
+    strings: [""],
     ptOff: i32([0, 0, 0]),
     pts: f32([]),
   };

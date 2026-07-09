@@ -16,6 +16,7 @@ const RECT = 0;
 const CIRCLE = 1;
 const PATH = 2;
 const POLYGON = 3;
+const TEXT = 4;
 
 /** Bounding box `[minX, minY, maxX, maxY]` for body `i` (mirrors primitives.test). */
 export function bodyBounds(
@@ -51,6 +52,13 @@ export function bodyBounds(
         return [minX - w, minY - w, maxX + w, maxY + w];
       }
       return [minX, minY, maxX, maxY];
+    }
+    case TEXT: {
+      // Anchor at (x,y) baseline; extends up by font size (`s`) and right by the
+      // estimated width (`size2`). A finite box so text is indexed/culled rather
+      // than always-drawn — text near a tile edge may clip.
+      const w = store.size2[i]!;
+      return [x, y - s, x + w, y + s * 0.3];
     }
     case RECT:
     default: {

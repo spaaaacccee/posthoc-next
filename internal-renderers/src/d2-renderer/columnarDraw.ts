@@ -13,6 +13,7 @@ const { ceil, PI } = Math;
 const CIRCLE = 1;
 const PATH = 2;
 const POLYGON = 3;
+const TEXT = 4;
 
 const GREY = "#808080";
 
@@ -45,6 +46,8 @@ export type Ctx2D = Pick<
   | "lineTo"
   | "closePath"
   | "stroke"
+  | "font"
+  | "fillText"
 >;
 
 /**
@@ -105,6 +108,12 @@ export function drawBody(
       ctx.lineWidth = ceil(store.size[i]! * t.sx) || 1;
       ctx.stroke();
     }
+  } else if (kind === TEXT) {
+    const str = store.strings[store.label[i]!];
+    if (!str) return;
+    ctx.fillStyle = style;
+    ctx.font = `${store.size[i]! * t.sx}px Inter, Helvetica, Arial, sans-serif`;
+    ctx.fillText(str, store.x[i]! * t.sx + t.x, store.y[i]! * t.sy + t.y);
   } else {
     // rect
     ctx.fillStyle = style;

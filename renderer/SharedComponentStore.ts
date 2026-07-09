@@ -52,6 +52,11 @@ export type SharedComponentStore = {
   /** Deduped CSS colour strings; `fill[i]` indexes this. Empty entry 0 = none. */
   palette: string[];
 
+  /** Text label: an index into {@link SharedComponentStore.strings} (0 = none). */
+  label: Int32Array;
+  /** Deduped label strings for `text` bodies; `label[i]` indexes this. */
+  strings: string[];
+
   /**
    * Ragged points for path/polygon. Body `i`'s points occupy
    * `pts[ptOff[i] * 2 .. ptOff[i + 1] * 2)` as interleaved x,y. `ptOff` has
@@ -73,4 +78,6 @@ export type LayerParams = {
   alpha?: number;
   /** Canvas compositing mode. */
   displayMode?: GlobalCompositeOperation;
+  /** Owning layer's key (mirrors `meta.sourceLayer`); used by fitCamera. */
+  sourceLayer?: string;
 };

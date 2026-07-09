@@ -141,6 +141,37 @@ export class D2RendererV2 extends D2RendererBase {
     this.#workers.forEach((w) => w.call("setLayerParams", [handle, params]));
   }
 
+  // Fit to the union of the selected layers' bounds. There is no per-body rbush
+  // in v2, so bounds come from each layer's shared Flatbush; the ViewportPage
+  // predicate only reads `meta.sourceLayer`, so a synthetic body per layer
+  // decides inclusion.
+  override fitCamera(
+    fn: (body: { meta?: { sourceLayer?: string } }) => boolean = () => true,
+  ): void {
+    let top = Infinity;
+    let left = Infinity;
+    let bottom = -Infinity;
+    let right = -Infinity;
+    let any = false;
+    for (const layer of this.#layers.values()) {
+      if (!layer.fb) continue;
+      if (!fn({ meta: { sourceLayer: layer.params.sourceLayer } })) continue;
+      any = true;
+      top = Math.min(top, layer.fb.minY);
+      left = Math.min(left, layer.fb.minX);
+      bottom = Math.max(bottom, layer.fb.maxY);
+      right = Math.max(right, layer.fb.maxX);
+    }
+    if (!any || !this.viewport) return;
+    this.viewport.animate?.({
+      position: new PIXI.Point((left + right) / 2, (top + bottom) / 2),
+      scale: (this.viewport.findFit?.(right - left, bottom - top) ?? 1) * 0.8,
+      ease: "easeOutExpo",
+      time: this.options.animationDuration * 1.5,
+      callbackOnComplete: () => this.handleFrustumChange(),
+    });
+  }
+
   #handleWorkerChange(options: D2RendererOptions) {
     map(this.#workers, (w) => w.terminate());
     this.#workers = times(options.workerCount, (i) => {
@@ -256,7 +287,7 @@ export class D2RendererV2 extends D2RendererBase {
 }
 
 export default makeRenderer(D2RendererV2, {
-  components: ["rect", "circle", "path", "polygon"],
+  components: ["rect", "circle", "path", "polygon", "text"],
   id: "d2-renderer-v2",
   name: "Pixel (beta)",
   description: "Shared-memory 2D renderer (beta)",

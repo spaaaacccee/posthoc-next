@@ -2,11 +2,13 @@ import { MapOutlined } from "@mui-symbols-material/w300";
 import { CircularProgress, Typography } from "@mui/material";
 import { MapPicker } from "components/app-bar/Input";
 import { custom, readUploadedMap } from "components/app-bar/upload";
+import { useRendererInstance } from "components/inspector/TraceRenderer";
 import { Heading, Option } from "components/layer-editor/Option";
 import { getParser } from "components/renderer";
 import { NodeList } from "components/renderer/NodeList";
 import { mapParsers } from "components/renderer/map-parser";
 import { ParsedMap } from "components/renderer/map-parser/Parser";
+import { buildStaticComponentStore } from "components/renderer/parser-v140/sharedComponentStore";
 import { useEffectWhen } from "hooks/useEffectWhen";
 import { useMapContent } from "hooks/useMapContent";
 import { useMapOptions } from "hooks/useMapOptions";
@@ -16,7 +18,8 @@ import { isUndefined, round } from "es-toolkit";
 import { get, keys, map, pick, set, startCase, toPairs as entries } from "es-toolkit/compat";
 import { nanoid as id } from "nanoid";
 import { withProduce } from "produce";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import { SourceHandle } from "renderer";
 import { slice } from "slices";
 import { Map } from "slices/UIState";
 import { Layer } from "slices/layers";
@@ -30,6 +33,73 @@ export type MapLayerData = {
 };
 
 export type MapLayer = Layer<MapLayerData>;
+
+type MapRendererProps = { layer?: MapLayer; index?: number };
+
+/** Legacy add()-based map feed. */
+function MapNodeListRenderer({ layer, index }: MapRendererProps) {
+  const { nodes } = layer?.source?.parsedMap ?? {};
+  const nodes2 = useMemo(
+    () => [
+      map(nodes, (n) => ({
+        ...n,
+        meta: {
+          ...n.meta,
+          sourceLayer: layer?.key,
+          sourceLayerIndex: index,
+          sourceLayerAlpha: 1 - 0.01 * +(layer?.transparency ?? 0),
+          sourceLayerDisplayMode: layer?.displayMode ?? "source-over",
+        },
+      })),
+    ],
+    [nodes, index, layer?.key, layer?.transparency, layer?.displayMode],
+  );
+  return <NodeList nodes={nodes2} />;
+}
+
+/**
+ * Load-based map feed for renderers advertising `supportsLoad`. A map is static
+ * (no playback), so its components pack into a shared store once with
+ * always-visible spans and `load()` — no per-step feed.
+ */
+function MapLoadRenderer({ layer, index }: MapRendererProps) {
+  const { renderer } = useRendererInstance();
+  const nodes = layer?.source?.parsedMap?.nodes;
+  const params = useMemo(
+    () => ({
+      index,
+      alpha: 1 - 0.01 * Number(layer?.transparency ?? 0),
+      displayMode: (layer?.displayMode ?? "source-over") as GlobalCompositeOperation,
+      sourceLayer: layer?.key,
+    }),
+    [index, layer?.transparency, layer?.displayMode, layer?.key],
+  );
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
+  const handleRef = useRef<SourceHandle | undefined>(undefined);
+
+  useEffect(() => {
+    if (!renderer?.load || !nodes?.length) return;
+    const store = buildStaticComponentStore(nodes as { component?: Record<string, any> }[]);
+    handleRef.current = renderer.load(store, paramsRef.current);
+    return () => {
+      if (handleRef.current) renderer.unload?.(handleRef.current);
+      handleRef.current = undefined;
+    };
+  }, [renderer, nodes]);
+
+  useEffect(() => {
+    if (handleRef.current) renderer?.setLayerParams?.(handleRef.current, params);
+  }, [renderer, params]);
+
+  return <></>;
+}
+
+function MapRendererDispatch({ layer, index }: MapRendererProps) {
+  const { renderer } = useRendererInstance();
+  if (renderer?.load) return <MapLoadRenderer layer={layer} index={index} />;
+  return <MapNodeListRenderer layer={layer} index={index} />;
+}
 
 export const controller = {
   key: "map",
@@ -109,25 +179,7 @@ export const controller = {
       </>
     );
   }),
-  renderer: ({ layer, index }) => {
-    const { nodes } = layer?.source?.parsedMap ?? {};
-    const nodes2 = useMemo(
-      () => [
-        map(nodes, (n) => ({
-          ...n,
-          meta: {
-            ...n.meta,
-            sourceLayer: layer?.key,
-            sourceLayerIndex: index,
-            sourceLayerAlpha: 1 - 0.01 * +(layer?.transparency ?? 0),
-            sourceLayerDisplayMode: layer?.displayMode ?? "source-over",
-          },
-        })),
-      ],
-      [nodes, index, layer?.key, layer?.transparency, layer?.displayMode],
-    );
-    return <NodeList nodes={nodes2} />;
-  },
+  renderer: ({ layer, index }) => <MapRendererDispatch layer={layer} index={index} />,
   service: withProduce(({ value, produce }) => {
     const { result: mapContent } = useMapContent(value?.source?.map);
     const { result: parsedMap, loading } = useParsedMap(mapContent, value?.source?.options);

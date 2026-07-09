@@ -27,14 +27,19 @@ const KIND_INDEX: Record<string, number> = Object.fromEntries(
   COMPONENT_KINDS.map((k, i) => [k, i]),
 );
 
-/**
- * Rasterizable kinds packed by default. `text` is deferred: it needs a string
- * pool and an unbounded (screen-anchored) bbox that Flatbush can't index cleanly,
- * so text labels are not yet drawn by v2.
- */
-export const DEFAULT_INCLUDE: ReadonlySet<string> = new Set(["rect", "circle", "path", "polygon"]);
+/** Rasterizable kinds packed by default. */
+export const DEFAULT_INCLUDE: ReadonlySet<string> = new Set([
+  "rect",
+  "circle",
+  "path",
+  "polygon",
+  "text",
+]);
 
 const GREY = "#808080";
+
+/** Static bodies (e.g. maps) are visible at every step; open-ended span end. */
+export const STATIC_END = 0x7fffffff;
 
 /** Mirrors `traceStreamStore`'s stack key so special semantics stay identical. */
 const makeKey = (id: unknown, condition: unknown) => `${id}::::${condition}`;
@@ -65,6 +70,7 @@ function allocStore(
   total: number,
   generation: number,
   palette: string[],
+  strings: string[],
   ptsLen: number,
 ): SharedComponentStore {
   return {
@@ -81,26 +87,20 @@ function allocStore(
     end: sab(Int32Array, 4, count),
     fill: sab(Int32Array, 4, count),
     palette,
+    label: sab(Int32Array, 4, count),
+    strings,
     ptOff: sab(Int32Array, 4, count + 1),
     pts: sab(Float32Array, 4, ptsLen),
   };
 }
 
 /**
- * Build a store over `[0, prefixEnd)`. Single forward pass: at each step, clear
- * any specials whose clear-event just arrived, then emit the step's bodies with
- * their spans. Bodies accumulate in plain number arrays and are copied into the
- * SAB columns at the end (exact size known only after the pass).
+ * Shared columnar packer. Accumulates bodies into plain number arrays (exact
+ * count known only after the pass), interns colours and label strings, and packs
+ * ragged path/polygon points. `setEnd` lets the caller back-patch a special's
+ * span end once its clear event is seen.
  */
-export function buildSharedComponentStore({
-  gen,
-  total,
-  prefixEnd = total,
-  generation = 0,
-  include = DEFAULT_INCLUDE,
-}: BuildComponentStoreParams): SharedComponentStore {
-  const end = Math.min(prefixEnd, total);
-
+function createPacker() {
   const kind: number[] = [];
   const x: number[] = [];
   const y: number[] = [];
@@ -110,32 +110,32 @@ export function buildSharedComponentStore({
   const start: number[] = [];
   const spanEnd: number[] = [];
   const fill: number[] = [];
-
-  // Ragged points (path/polygon): interleaved x,y in `pts`; `ptOff` is the
-  // running per-body point offset (points, not floats), length count + 1.
+  const label: number[] = [];
   const pts: number[] = [];
   const ptOff: number[] = [0];
 
-  const palette: string[] = [""]; // index 0 = "none"
+  const palette: string[] = [""];
   const paletteIndex = new Map<string, number>([["", 0]]);
-  const internColor = (c?: string) => {
-    const key = c ?? "";
-    let idx = paletteIndex.get(key);
+  const strings: string[] = [""];
+  const stringIndex = new Map<string, number>([["", 0]]);
+  const intern = (pool: string[], index: Map<string, number>, v: string) => {
+    let idx = index.get(v);
     if (idx === undefined) {
-      idx = palette.length;
-      palette.push(key);
-      paletteIndex.set(key, idx);
+      idx = pool.length;
+      pool.push(v);
+      index.set(v, idx);
     }
     return idx;
   };
-
-  // clearKey -> body indices of specials awaiting that clear event.
-  const stack = new Map<string, number[]>();
 
   const pushBody = (c: Record<string, any>, s: number, e: number): number => {
     const bi = kind.length;
     kind.push(KIND_INDEX[c.$] ?? 0);
     let np = 0;
+    let lbl = 0;
+    let a = c.alpha ?? 1;
+    let color: string = c.fill ?? GREY;
+
     if (c.$ === "circle") {
       x.push(c.x ?? 0);
       y.push(c.y ?? 0);
@@ -151,6 +151,18 @@ export function buildSharedComponentStore({
       const points = Array.isArray(c.points) ? c.points : [];
       for (const p of points) pts.push(p?.x ?? 0, p?.y ?? 0);
       np = points.length;
+    } else if (c.$ === "text") {
+      // Anchor folds the label offset into x/y; `size` = font size, `size2` = an
+      // estimated pixel width used only for the bbox. v1 draws labels at alpha 1.
+      const fontSize = c["label-size"] ?? c.fontSize ?? 4;
+      const str = String(c.label ?? c.text ?? "");
+      x.push((c.x ?? 0) + (c["label-x"] ?? c.textX ?? 0));
+      y.push((c.y ?? 0) + (c["label-y"] ?? c.textY ?? 0));
+      size.push(fontSize);
+      size2.push(str.length * fontSize * 0.6);
+      lbl = intern(strings, stringIndex, str);
+      color = c["label-color"] ?? c.fontColor ?? "grey";
+      a = 1;
     } else {
       // rect
       x.push(c.x ?? 0);
@@ -158,13 +170,57 @@ export function buildSharedComponentStore({
       size.push(c.width ?? 0);
       size2.push(c.height ?? 0);
     }
-    alpha.push(c.alpha ?? 1);
-    fill.push(internColor(c.fill ?? GREY));
+
+    alpha.push(a);
+    fill.push(intern(palette, paletteIndex, color ?? ""));
+    label.push(lbl);
     start.push(s);
     spanEnd.push(e);
     ptOff.push(ptOff[ptOff.length - 1]! + np);
     return bi;
   };
+
+  const setEnd = (bi: number, e: number) => {
+    spanEnd[bi] = e;
+  };
+
+  const build = (total: number, generation: number): SharedComponentStore => {
+    const count = kind.length;
+    const store = allocStore(count, total, generation, palette, strings, pts.length);
+    store.kind.set(kind);
+    store.x.set(x);
+    store.y.set(y);
+    store.size.set(size);
+    store.size2.set(size2);
+    store.alpha.set(alpha);
+    store.start.set(start);
+    store.end.set(spanEnd);
+    store.fill.set(fill);
+    store.label.set(label);
+    store.ptOff.set(ptOff);
+    store.pts.set(pts);
+    return store;
+  };
+
+  return { pushBody, setEnd, build };
+}
+
+/**
+ * Build a store over `[0, prefixEnd)`. Single forward pass: at each step, clear
+ * any specials whose clear-event just arrived, then emit the step's bodies.
+ */
+export function buildSharedComponentStore({
+  gen,
+  total,
+  prefixEnd = total,
+  generation = 0,
+  include = DEFAULT_INCLUDE,
+}: BuildComponentStoreParams): SharedComponentStore {
+  const end = Math.min(prefixEnd, total);
+  const { pushBody, setEnd, build } = createPacker();
+
+  // clearKey -> body indices of specials awaiting that clear event.
+  const stack = new Map<string, number[]>();
 
   for (let i = 0; i < end; i++) {
     const frame = gen(i);
@@ -174,7 +230,7 @@ export function buildSharedComponentStore({
     const clearKey = makeKey(e?.id, e?.type);
     const pending = stack.get(clearKey);
     if (pending) {
-      for (const bi of pending) spanEnd[bi] = i;
+      for (const bi of pending) setEnd(bi, i);
       stack.delete(clearKey);
     }
 
@@ -197,18 +253,25 @@ export function buildSharedComponentStore({
     }
   }
 
-  const count = kind.length;
-  const store = allocStore(count, total, generation, palette, pts.length);
-  store.kind.set(kind);
-  store.x.set(x);
-  store.y.set(y);
-  store.size.set(size);
-  store.size2.set(size2);
-  store.alpha.set(alpha);
-  store.start.set(start);
-  store.end.set(spanEnd);
-  store.fill.set(fill);
-  store.ptOff.set(ptOff);
-  store.pts.set(pts);
-  return store;
+  return build(total, generation);
+}
+
+/**
+ * Build a store from a flat, static component list (e.g. a parsed map). Every
+ * body is visible at all steps (`[0, STATIC_END)`), so the shared global step
+ * driven by a trace layer never hides map geometry.
+ */
+export function buildStaticComponentStore(
+  components: { component?: Record<string, any> }[],
+  {
+    generation = 0,
+    include = DEFAULT_INCLUDE,
+  }: { generation?: number; include?: ReadonlySet<string> } = {},
+): SharedComponentStore {
+  const { pushBody, build } = createPacker();
+  for (const entry of components) {
+    const c = entry?.component;
+    if (c && include.has(c.$)) pushBody(c, 0, STATIC_END);
+  }
+  return build(1, generation);
 }
