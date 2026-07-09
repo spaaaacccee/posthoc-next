@@ -41,14 +41,18 @@ export function RendererService() {
 
   useAsync(async () => {
     const rs: Renderer[] = [];
+    const seen = new Set<string>();
     for (const { transport, url, key, disabled } of renderer ?? []) {
       if (!disabled) {
         const t = new transports[transport].constructor({ url });
-        rs.push({
-          key,
-          url,
-          renderer: await t.get(),
-        });
+        const definition = await t.get();
+        // Persisted settings can reference a renderer that no longer exists, or
+        // two urls that now alias the same one (e.g. the old `d2-renderer-v2`).
+        // Skip both rather than pushing an entry with no `meta`.
+        const id = definition?.meta?.id;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        rs.push({ key, url, renderer: definition });
       }
     }
     slice.renderers.set(rs);

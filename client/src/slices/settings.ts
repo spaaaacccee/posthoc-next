@@ -50,14 +50,15 @@ export const defaultRemotes = [
 ];
 
 export const defaultRenderers = [
+  // Order matters: the first entry is the "auto" default.
   {
     url: `internal://d2-renderer/`,
     key: "d2-renderer",
     transport: "native",
   },
   {
-    url: `internal://d2-renderer-v2/`,
-    key: "d2-renderer-v2",
+    url: `internal://d2-renderer-legacy/`,
+    key: "d2-renderer-legacy",
     transport: "native",
   },
   {

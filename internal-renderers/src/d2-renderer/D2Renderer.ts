@@ -297,9 +297,9 @@ export class D2Renderer extends D2RendererBase {
 
 export default makeRenderer(D2Renderer, {
   components: ["rect", "circle", "path", "polygon"],
-  id: "d2-renderer",
-  name: "Pixel",
-  description: "Comfortably performant 2D renderer",
+  id: "d2-renderer-legacy",
+  name: "Pixel (legacy)",
+  description: "Previous-generation 2D renderer; clones components to each worker",
   version: "1.0.0",
 });
 
