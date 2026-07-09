@@ -173,8 +173,8 @@ export function TraceRenderer({ width, height, renderer, rendererRef, layers }: 
   // legacy per-step components nothing would consume.
   useEffect(() => {
     if (!instance) return;
-    slice.rendererCapabilities.set((s) => void (s[key] = typeof instance.load === "function"));
-    return () => slice.rendererCapabilities.set((s) => void delete s[key]);
+    slice.rendererCapabilities.mount(key, typeof instance.load === "function");
+    return () => slice.rendererCapabilities.unmount(key);
   }, [key, instance]);
 
   useEffect(() => {

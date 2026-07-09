@@ -4,12 +4,13 @@ import { useThrottle } from "react-use";
 
 import { useRendererInstance } from "components/inspector/TraceRenderer";
 import { NodeList, PersistentNodes } from "components/renderer/NodeList";
-import { buildComponentStore } from "components/renderer/parser-v140/componentStoreClient";
+import { useComponentStore } from "components/renderer/parser-v140/componentStoreClient";
 import { StreamingPersistentNodes } from "components/renderer/StreamingPersistentNodes";
 import { useTraceContent } from "hooks/useTraceContent";
 import { Trace } from "protocol/Trace-v140";
 import { ComponentEntry, SourceHandle } from "renderer";
 import { loading } from "slices/loading";
+import { rendererContent } from "slices/renderers";
 import { TraceLayer } from "./TraceLayer";
 import { getStreamBuffers, TraceStreamHandle } from "./traceStreamStore";
 import { Controller } from "./types";
@@ -132,7 +133,7 @@ function LegacyRenderer({ layer, index }: RendererProps) {
 }
 
 /**
- * Load-based feed for renderers advertising `supportsLoad` (d2-renderer-v2).
+ * Load-based feed for renderers advertising `supportsLoad` (`d2-renderer`).
  * Instead of streaming per-step component chunks via `add()`, it builds the
  * whole trace into a shared columnar store once and `load()`s it, then drives
  * visibility with `setStep`. Streaming preview is deliberately second-class:
@@ -165,43 +166,37 @@ function LoadRenderer({ layer, index }: RendererProps) {
   paramsRef.current = params;
   const handleRef = useRef<SourceHandle | undefined>(undefined);
 
+  // Cached per trace, so navigating away from the viewport and back doesn't
+  // rebuild the whole store.
+  const { data: store, isFetching } = useComponentStore({
+    key: traceKey,
+    trace: content,
+    context,
+    view: "main",
+    contextKey,
+  });
+
+  // Hold the shared "layers" loading counter while the store is being built;
+  // otherwise the app looks idle with nothing drawn.
   useEffect(() => {
-    if (!renderer?.load || !content?.events?.length) return;
-    const controller = new AbortController();
-    // Hold the shared "layers" loading counter for the whole off-main build.
-    // Without this the app looks idle while the store is still being built and
-    // nothing has been drawn yet.
+    if (!isFetching) return;
     loading.start("layers");
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      loading.end("layers");
-    };
-    (async () => {
-      try {
-        const store = await buildComponentStore({
-          trace: content,
-          context,
-          view: "main",
-          traceKey,
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted || !store || !renderer.load) return;
-        handleRef.current = renderer.load(store, paramsRef.current);
-        renderer.setStep?.(stepRef.current);
-      } finally {
-        release();
-      }
-    })();
+    return () => loading.end("layers");
+  }, [isFetching]);
+
+  useEffect(() => {
+    if (!renderer?.load || !store) return;
+    const handle = renderer.load(store, paramsRef.current);
+    handleRef.current = handle;
+    renderer.setStep?.(stepRef.current);
+    // The visualisation now has contents; let the viewport fit to them.
+    rendererContent.bump();
     return () => {
-      controller.abort();
-      release();
-      if (handleRef.current) renderer.unload?.(handleRef.current);
+      renderer.unload?.(handle);
       handleRef.current = undefined;
+      rendererContent.bump();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderer, content, contextKey, traceKey]);
+  }, [renderer, store]);
 
   // Free compositing updates on the already-loaded layer.
   useEffect(() => {

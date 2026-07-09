@@ -77,13 +77,24 @@ export type IndexedGeneration = {
   generation: number;
 };
 
+// A store is immutable, so its index is too. Re-`load()`ing the same (cached)
+// store — e.g. every time the viewport remounts — should not rebuild it.
+const indexCache = new WeakMap<SharedComponentStore, SharedArrayBuffer | undefined>();
+
 /**
  * Build the shared Flatbush index for a store. Bodies are added in column order
  * so a query returns store indices directly. Returns `undefined` for an empty
  * store (Flatbush requires ≥1 item). The `.data` buffer is a SharedArrayBuffer
- * ready to hand to workers.
+ * ready to hand to workers. Memoized per store.
  */
 export function buildIndex(store: SharedComponentStore): SharedArrayBuffer | undefined {
+  if (indexCache.has(store)) return indexCache.get(store);
+  const built = buildIndexUncached(store);
+  indexCache.set(store, built);
+  return built;
+}
+
+function buildIndexUncached(store: SharedComponentStore): SharedArrayBuffer | undefined {
   if (store.count === 0) return undefined;
   const fb = new Flatbush(
     store.count,

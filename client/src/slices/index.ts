@@ -6,6 +6,7 @@ import { features as featuresStore } from "slices/features";
 import { log as logStore } from "slices/log";
 import {
   rendererCapabilities as rendererCapabilitiesStore,
+  rendererContent as rendererContentStore,
   renderers as renderersStore,
 } from "slices/renderers";
 import { screenshots as screenshotsStore } from "slices/screenshots";
@@ -26,6 +27,7 @@ export const slice = {
   log: logStore,
   renderers: renderersStore,
   rendererCapabilities: rendererCapabilitiesStore,
+  rendererContent: rendererContentStore,
   busy: busyStore,
   auth: authStore,
   cloudStorage: cloudStorageStore,

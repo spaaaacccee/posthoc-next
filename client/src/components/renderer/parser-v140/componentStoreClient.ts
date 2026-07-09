@@ -1,3 +1,4 @@
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { EventContext } from "protocol";
 import { Trace } from "protocol/Trace-v140";
 import type { SharedComponentStore } from "renderer";
@@ -83,4 +84,40 @@ export async function buildComponentStore({
   }
 
   return withWorker("component-store", spawnWorker, terminate, (w) => w.build(params), { signal });
+}
+
+export type ComponentStoreQueryOptions = {
+  /** Stable trace identity; also the cache key. */
+  key?: string;
+  trace?: Trace;
+  context: EventContext;
+  view?: string;
+  /** Identity of `context`, so a theme change rebuilds the store. */
+  contextKey?: string;
+  include?: string[];
+};
+
+/**
+ * The built store, cached per trace. Building it is expensive (a full off-main
+ * frame-gen + pack), and the renderer feed unmounts whenever you navigate away
+ * from the viewport — without this it would rebuild on every return.
+ */
+export const componentStoreQuery = ({
+  key,
+  trace,
+  context,
+  view = "main",
+  contextKey,
+  include,
+}: ComponentStoreQueryOptions) =>
+  queryOptions({
+    queryKey: ["component-store", key, view, contextKey],
+    queryFn: ({ signal }) =>
+      buildComponentStore({ trace, context, view, traceKey: key, include, signal }),
+    enabled: !!key && !!trace?.events?.length,
+    staleTime: Infinity,
+  });
+
+export function useComponentStore(options: ComponentStoreQueryOptions) {
+  return useQuery(componentStoreQuery(options));
 }

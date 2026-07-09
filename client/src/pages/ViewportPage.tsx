@@ -74,6 +74,11 @@ export function ViewportPage({ template: Page }: PageContentProps) {
 
   const { selected, auto } = useRendererResolver(state?.renderer);
 
+  // Bumped when a renderer layer finishes loading. A layer's `viewKey` commits
+  // well before the (off-main) component store is built and handed to the
+  // renderer, so without this the fit would run against an empty renderer.
+  const contentVersion = useOne(slice.rendererContent, (s) => s.version);
+
   useEffect(() => {
     delay(() => {
       rendererInstance?.fitCamera?.((b) =>
@@ -85,7 +90,7 @@ export function ViewportPage({ template: Page }: PageContentProps) {
         ),
       );
     }, 150);
-  }, [rendererInstance, selectedLayerIdentities]);
+  }, [rendererInstance, selectedLayerIdentities, contentVersion]);
 
   const size = useSurfaceAvailableCssSize();
 

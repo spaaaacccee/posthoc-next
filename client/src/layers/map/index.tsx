@@ -18,9 +18,11 @@ import { isUndefined, round } from "es-toolkit";
 import { get, keys, map, pick, set, startCase, toPairs as entries } from "es-toolkit/compat";
 import { nanoid as id } from "nanoid";
 import { withProduce } from "produce";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef } from "react";
 import { SourceHandle } from "renderer";
 import { slice } from "slices";
+import { rendererContent } from "slices/renderers";
 import { Map } from "slices/UIState";
 import { Layer } from "slices/layers";
 import { useOne } from "slices/useOne";
@@ -78,15 +80,25 @@ function MapLoadRenderer({ layer, index }: MapRendererProps) {
   paramsRef.current = params;
   const handleRef = useRef<SourceHandle | undefined>(undefined);
 
+  // Cached per parsed map, so navigating back to the viewport doesn't repack it.
+  const { data: store } = useQuery({
+    queryKey: ["map-store", layer?.key, layer?.viewKey],
+    queryFn: () => buildStaticComponentStore(nodes as { component?: Record<string, any> }[]),
+    enabled: !!nodes?.length,
+    staleTime: Infinity,
+  });
+
   useEffect(() => {
-    if (!renderer?.load || !nodes?.length) return;
-    const store = buildStaticComponentStore(nodes as { component?: Record<string, any> }[]);
-    handleRef.current = renderer.load(store, paramsRef.current);
+    if (!renderer?.load || !store) return;
+    const handle = renderer.load(store, paramsRef.current);
+    handleRef.current = handle;
+    rendererContent.bump();
     return () => {
-      if (handleRef.current) renderer.unload?.(handleRef.current);
+      renderer.unload?.(handle);
       handleRef.current = undefined;
+      rendererContent.bump();
     };
-  }, [renderer, nodes]);
+  }, [renderer, store]);
 
   useEffect(() => {
     if (handleRef.current) renderer?.setLayerParams?.(handleRef.current, params);
