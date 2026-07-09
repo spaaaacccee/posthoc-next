@@ -14,6 +14,8 @@ import type { SharedComponentStore } from "renderer";
 // Kind indices, matching COMPONENT_KINDS order in renderer/SharedComponentStore.
 const RECT = 0;
 const CIRCLE = 1;
+const PATH = 2;
+const POLYGON = 3;
 
 /** Bounding box `[minX, minY, maxX, maxY]` for body `i` (mirrors primitives.test). */
 export function bodyBounds(
@@ -26,6 +28,30 @@ export function bodyBounds(
   switch (store.kind[i]) {
     case CIRCLE:
       return [x - s, y - s, x + s, y + s];
+    case PATH:
+    case POLYGON: {
+      const from = store.ptOff[i]! * 2;
+      const to = store.ptOff[i + 1]! * 2;
+      if (to <= from) return [0, 0, 0, 0];
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (let p = from; p < to; p += 2) {
+        const px = store.pts[p]!;
+        const py = store.pts[p + 1]!;
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+      if (store.kind[i] === PATH) {
+        // Pad by line width + 1, matching primitives.path.test.
+        const w = s + 1;
+        return [minX - w, minY - w, maxX + w, maxY + w];
+      }
+      return [minX, minY, maxX, maxY];
+    }
     case RECT:
     default: {
       // size = width, size2 = height; guard against negative extents.

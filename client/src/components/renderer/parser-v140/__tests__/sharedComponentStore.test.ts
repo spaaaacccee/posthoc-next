@@ -113,3 +113,45 @@ describe("buildSharedComponentStore prefix + include", () => {
     expect(store.start.buffer).toBeInstanceOf(SharedArrayBuffer);
   });
 });
+
+describe("buildSharedComponentStore ragged points (path/polygon)", () => {
+  const raggedGen = (i: number): SingleFrame => {
+    const per: Record<string, unknown>[][] = [
+      [
+        {
+          $: "polygon",
+          points: [
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 5, y: 8 },
+          ],
+          fill: "red",
+        },
+      ],
+      [
+        {
+          $: "path",
+          points: [
+            { x: 100, y: 100 },
+            { x: 120, y: 140 },
+          ],
+          "line-width": 3,
+          fill: "blue",
+        },
+      ],
+      [{ $: "rect", x: 200, y: 200, width: 5, height: 5, fill: "green" }],
+    ];
+    return {
+      event: { id: i, type: "e" } as TraceEvent,
+      components: { persistent: (per[i] ?? []).map(entry), transient: [], special: [] },
+    } as SingleFrame;
+  };
+
+  it("packs interleaved points into pts with per-body ptOff, and lineWidth into size", () => {
+    const store = buildSharedComponentStore({ gen: raggedGen, total: 3 });
+    expect(Array.from(store.kind)).toEqual([3, 2, 0]); // polygon, path, rect
+    expect(Array.from(store.ptOff)).toEqual([0, 3, 5, 5]); // 3 + 2 + 0 points
+    expect(Array.from(store.pts)).toEqual([0, 0, 10, 0, 5, 8, 100, 100, 120, 140]);
+    expect(store.size[1]).toBe(3); // path line width
+  });
+});

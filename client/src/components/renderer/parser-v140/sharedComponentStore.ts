@@ -27,8 +27,12 @@ const KIND_INDEX: Record<string, number> = Object.fromEntries(
   COMPONENT_KINDS.map((k, i) => [k, i]),
 );
 
-/** First-slice coverage: the pure-scalar primitives. Broadened in P6. */
-export const DEFAULT_INCLUDE: ReadonlySet<string> = new Set(["rect", "circle"]);
+/**
+ * Rasterizable kinds packed by default. `text` is deferred: it needs a string
+ * pool and an unbounded (screen-anchored) bbox that Flatbush can't index cleanly,
+ * so text labels are not yet drawn by v2.
+ */
+export const DEFAULT_INCLUDE: ReadonlySet<string> = new Set(["rect", "circle", "path", "polygon"]);
 
 const GREY = "#808080";
 
@@ -61,6 +65,7 @@ function allocStore(
   total: number,
   generation: number,
   palette: string[],
+  ptsLen: number,
 ): SharedComponentStore {
   return {
     generation,
@@ -76,9 +81,8 @@ function allocStore(
     end: sab(Int32Array, 4, count),
     fill: sab(Int32Array, 4, count),
     palette,
-    // No ragged points in the first slice; zero-initialised (all offsets 0).
     ptOff: sab(Int32Array, 4, count + 1),
-    pts: sab(Float32Array, 4, 0),
+    pts: sab(Float32Array, 4, ptsLen),
   };
 }
 
@@ -107,6 +111,11 @@ export function buildSharedComponentStore({
   const spanEnd: number[] = [];
   const fill: number[] = [];
 
+  // Ragged points (path/polygon): interleaved x,y in `pts`; `ptOff` is the
+  // running per-body point offset (points, not floats), length count + 1.
+  const pts: number[] = [];
+  const ptOff: number[] = [0];
+
   const palette: string[] = [""]; // index 0 = "none"
   const paletteIndex = new Map<string, number>([["", 0]]);
   const internColor = (c?: string) => {
@@ -126,13 +135,24 @@ export function buildSharedComponentStore({
   const pushBody = (c: Record<string, any>, s: number, e: number): number => {
     const bi = kind.length;
     kind.push(KIND_INDEX[c.$] ?? 0);
+    let np = 0;
     if (c.$ === "circle") {
       x.push(c.x ?? 0);
       y.push(c.y ?? 0);
       size.push(c.radius ?? 0);
       size2.push(0);
+    } else if (c.$ === "path" || c.$ === "polygon") {
+      // No anchor; geometry lives entirely in `points`. `size` carries the
+      // path's line width (normalising the pre-1.4.0 `line-width` alias).
+      x.push(0);
+      y.push(0);
+      size.push(c.$ === "path" ? (c.lineWidth ?? c["line-width"] ?? 0) : 0);
+      size2.push(0);
+      const points = Array.isArray(c.points) ? c.points : [];
+      for (const p of points) pts.push(p?.x ?? 0, p?.y ?? 0);
+      np = points.length;
     } else {
-      // rect (and, later, others that carry x/y/width/height)
+      // rect
       x.push(c.x ?? 0);
       y.push(c.y ?? 0);
       size.push(c.width ?? 0);
@@ -142,6 +162,7 @@ export function buildSharedComponentStore({
     fill.push(internColor(c.fill ?? GREY));
     start.push(s);
     spanEnd.push(e);
+    ptOff.push(ptOff[ptOff.length - 1]! + np);
     return bi;
   };
 
@@ -177,7 +198,7 @@ export function buildSharedComponentStore({
   }
 
   const count = kind.length;
-  const store = allocStore(count, total, generation, palette);
+  const store = allocStore(count, total, generation, palette, pts.length);
   store.kind.set(kind);
   store.x.set(x);
   store.y.set(y);
@@ -187,5 +208,7 @@ export function buildSharedComponentStore({
   store.start.set(start);
   store.end.set(spanEnd);
   store.fill.set(fill);
+  store.ptOff.set(ptOff);
+  store.pts.set(pts);
   return store;
 }
