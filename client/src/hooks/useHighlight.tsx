@@ -150,10 +150,7 @@ export function useHighlightNodes(key?: string): {
     [trace, setLayer],
   );
 
-  const groupedTraceBypId = useMemo(
-    () => index(trace?.events, "index", "pId"),
-    [trace?.events],
-  );
+  const groupedTraceBypId = useMemo(() => index(trace?.events, "index", "pId"), [trace?.events]);
 
   const getAllSubtreeNodes = (root: Node, visited = new Set<number | string>()): Subtree => {
     if (visited.has(root.id)) {
