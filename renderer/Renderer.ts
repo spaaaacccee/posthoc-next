@@ -1,6 +1,9 @@
 import { CompiledComponent, Point, Size, Bounds } from "protocol";
 import { FeatureDescriptor } from "protocol/FeatureQuery";
 import EventEmitter from "typed-emitter";
+import { SharedComponentStore, SourceHandle, LayerParams } from "./SharedComponentStore";
+
+export * from "./SharedComponentStore";
 
 export type RendererOptions = {
   screenSize: Size;
@@ -51,6 +54,18 @@ export interface Renderer<
   destroy(): void;
   setOptions(options: Partial<T>): void;
   add(components: ComponentEntry<V>[]): RemoveElementCallback;
+  /**
+   * Load an immutable, shared columnar store as a layer, returning a handle to
+   * update or unload it. Renderers advertising `supportsLoad` in their metadata
+   * implement this and the sibling `setStep`/`setLayerParams`/`unload`; others
+   * rely on `add`. Membership is fixed at load; what's *visible* is driven by
+   * `setStep` against each body's `[start, end)` span.
+   */
+  load?(store: SharedComponentStore, params?: LayerParams): SourceHandle;
+  unload?(handle: SourceHandle): void;
+  /** Set the global playhead. A body is visible iff `start <= step < end`. */
+  setStep?(step: number): void;
+  setLayerParams?(handle: SourceHandle, params: LayerParams): void;
   getView(): HTMLElement | undefined;
   fitCamera(fn?: (body: Bounds & ComponentEntry<V, M>) => boolean): void;
   initialCamera(): void;
@@ -61,6 +76,12 @@ export interface Renderer<
 type RendererMetadata = FeatureDescriptor & {
   components: string[];
   version?: string;
+  /**
+   * Renderer implements the `load()`/`setStep()` shared-columnar-store contract.
+   * The app branches its feed on this: `true` → build a `SharedComponentStore`
+   * and `load()` it once + drive `setStep`; `false` → the legacy `add()` path.
+   */
+  supportsLoad?: boolean;
 };
 
 export type RendererDefinition<

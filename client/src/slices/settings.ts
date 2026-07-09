@@ -56,6 +56,11 @@ export const defaultRenderers = [
     transport: "native",
   },
   {
+    url: `internal://d2-renderer-v2/`,
+    key: "d2-renderer-v2",
+    transport: "native",
+  },
+  {
     url: `internal://d2-minimal-renderer/`,
     key: "d2-minimal-renderer",
     transport: "native",
