@@ -24,6 +24,12 @@ export const service = withProduce(({ value, produce }) => {
     // re-running on every render; this reacts to the trace and its event count.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trace?.key, trace?.content?.events?.length]);
+  // A new trace always starts at the first step. Keyed on the trace alone, so a
+  // growing event count during streaming doesn't yank playback back to the start.
+  useEffect(() => {
+    produce((l) => void set(l, "source.step", 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trace?.key]);
   const { isTrusted } = useUntrustedLayers();
 
   const context = useEventContext();

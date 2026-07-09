@@ -41,7 +41,9 @@ export function computed<T extends keyof ComputedPlaybackLayerProperties>(k: T) 
   return (l?: Layer<PlaybackLayerData>) => {
     const { playback, playbackTo, step: _step } = l?.source ?? {};
 
-    const step = min([playbackTo, _step]) ?? 0;
+    // `min` skips undefined, so an unset step must default to 0 here — otherwise
+    // it resolves to `playbackTo`, i.e. the end of the trace.
+    const step = min([playbackTo, _step ?? 0]) ?? 0;
 
     const ready = !!playbackTo;
     const playing = playback === "playing";
