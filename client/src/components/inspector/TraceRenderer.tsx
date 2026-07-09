@@ -168,6 +168,15 @@ export function TraceRenderer({ width, height, renderer, rendererRef, layers }: 
     return () => slice.screenshots.set((s) => void delete s[key]);
   }, [key, instance]);
 
+  // Publish whether this mounted renderer drives the shared-store load() path,
+  // so layer services (which mount outside this context) can skip generating the
+  // legacy per-step components nothing would consume.
+  useEffect(() => {
+    if (!instance) return;
+    slice.rendererCapabilities.set((s) => void (s[key] = typeof instance.load === "function"));
+    return () => slice.rendererCapabilities.set((s) => void delete s[key]);
+  }, [key, instance]);
+
   useEffect(() => {
     if (instance) {
       instance.setOptions({

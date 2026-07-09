@@ -8,6 +8,7 @@ import { Trace } from "protocol/Trace-v140";
 import { withProduce } from "produce";
 import { useEffect } from "react";
 import { BreakpointService } from "services/BreakpointService";
+import { useAllRenderersSupportLoad } from "slices/renderers";
 import { set } from "utils/set";
 import { Controller } from "./types";
 import { useEventContext } from "./useEventContext";
@@ -31,8 +32,15 @@ export const service = withProduce(({ value, produce }) => {
   // else (legacy formats, untrusted layers) uses the one-shot path below.
   const streaming = trace?.content?.version === "1.4.0" && isTrusted;
 
+  // When every mounted renderer drives the shared-store load() path, it builds
+  // its own columnar store — so the per-step component fleet is pure waste.
+  // `streaming` stays true (which keeps the one-shot parser disabled); only the
+  // component generation is skipped.
+  const loadCapable = useAllRenderersSupportLoad();
+
   useTraceStream({
     enabled: streaming,
+    componentsEnabled: !loadCapable,
     traceKey: trace?.key,
     content: trace?.content as Trace,
     context,

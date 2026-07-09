@@ -150,7 +150,9 @@ export class D2RendererV2Worker extends EventEmitter<
   }
 
   render() {
-    if (!this.#orderedLayers().length) return;
+    // Note: no layer guard. Empty tiles still paint the background + centre
+    // notch, which is the only cue that panning is doing anything when nothing
+    // is loaded (or you've panned off the content).
     for (const { tile, bounds } of getTiles(this.#frustum, this.#options.tileSubdivision).tiles) {
       if (this.#shouldRender(tile)) {
         const out = this.#renderTile(bounds, this.#options.tileResolution);
@@ -165,9 +167,21 @@ export class D2RendererV2Worker extends EventEmitter<
     }
   }
 
+  /**
+   * A faint crosshair at each tile's centre. With an empty (or panned-away)
+   * viewport this is the only thing that moves, so the user can tell the drag is
+   * registering. Geometry matches v1's notch.
+   */
+  #drawNotch(ctx: OffscreenCanvasRenderingContext2D, tile: Size) {
+    const length = tile.width * 0.05;
+    const thickness = 1;
+    ctx.fillStyle = `rgba(127,127,127,0.36)`;
+    ctx.fillRect((tile.width - length) / 2, (tile.height - thickness) / 2, length, thickness);
+    ctx.fillRect((tile.width - thickness) / 2, (tile.height - length) / 2, thickness, length);
+  }
+
   #renderTile(bounds: Bounds, tile: Size): { hash: string; bitmap?: ImageBitmap } | undefined {
     const layers = this.#orderedLayers();
-    if (!layers.length) return undefined;
     const { top, right, bottom, left } = bounds;
 
     // Visible bodies per layer + a content hash over (generation, visible ids).
@@ -193,6 +207,7 @@ export class D2RendererV2Worker extends EventEmitter<
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = this.#options.backgroundColor;
     ctx.fillRect(0, 0, tile.width, tile.height);
+    this.#drawNotch(ctx, tile);
 
     const t = columnarDrawTransform(bounds, tile);
     for (const { l, indices } of perLayer) {

@@ -9,6 +9,7 @@ import { StreamingPersistentNodes } from "components/renderer/StreamingPersisten
 import { useTraceContent } from "hooks/useTraceContent";
 import { Trace } from "protocol/Trace-v140";
 import { ComponentEntry, SourceHandle } from "renderer";
+import { loading } from "slices/loading";
 import { TraceLayer } from "./TraceLayer";
 import { getStreamBuffers, TraceStreamHandle } from "./traceStreamStore";
 import { Controller } from "./types";
@@ -167,20 +168,35 @@ function LoadRenderer({ layer, index }: RendererProps) {
   useEffect(() => {
     if (!renderer?.load || !content?.events?.length) return;
     const controller = new AbortController();
+    // Hold the shared "layers" loading counter for the whole off-main build.
+    // Without this the app looks idle while the store is still being built and
+    // nothing has been drawn yet.
+    loading.start("layers");
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      loading.end("layers");
+    };
     (async () => {
-      const store = await buildComponentStore({
-        trace: content,
-        context,
-        view: "main",
-        traceKey,
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted || !store || !renderer.load) return;
-      handleRef.current = renderer.load(store, paramsRef.current);
-      renderer.setStep?.(stepRef.current);
+      try {
+        const store = await buildComponentStore({
+          trace: content,
+          context,
+          view: "main",
+          traceKey,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || !store || !renderer.load) return;
+        handleRef.current = renderer.load(store, paramsRef.current);
+        renderer.setStep?.(stepRef.current);
+      } finally {
+        release();
+      }
     })();
     return () => {
       controller.abort();
+      release();
       if (handleRef.current) renderer.unload?.(handleRef.current);
       handleRef.current = undefined;
     };

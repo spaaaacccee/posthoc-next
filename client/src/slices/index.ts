@@ -4,7 +4,10 @@ import { cloudStorage as cloudStorageStore } from "slices/cloudStorage";
 import { connections as connectionsStore } from "slices/connections";
 import { features as featuresStore } from "slices/features";
 import { log as logStore } from "slices/log";
-import { renderers as renderersStore } from "slices/renderers";
+import {
+  rendererCapabilities as rendererCapabilitiesStore,
+  renderers as renderersStore,
+} from "slices/renderers";
 import { screenshots as screenshotsStore } from "slices/screenshots";
 import { layers as layersStore } from "./layers";
 import { loading as loadingStore } from "./loading";
@@ -22,6 +25,7 @@ export const slice = {
   features: featuresStore,
   log: logStore,
   renderers: renderersStore,
+  rendererCapabilities: rendererCapabilitiesStore,
   busy: busyStore,
   auth: authStore,
   cloudStorage: cloudStorageStore,

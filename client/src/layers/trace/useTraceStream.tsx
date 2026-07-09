@@ -41,6 +41,7 @@ const autoWorkerCount = () => clamp(floor(navigator.hardwareConcurrency / 4), 1,
  */
 export function useTraceStream({
   enabled,
+  componentsEnabled = true,
   traceKey,
   content,
   context,
@@ -49,6 +50,15 @@ export function useTraceStream({
   produce,
 }: {
   enabled: boolean;
+  /**
+   * Generate per-step render components into the frame buffers. Set false when
+   * every mounted renderer uses the shared-store `load()` path — it builds its
+   * own columnar store, so this fleet's output would be pure waste (CPU plus a
+   * full main-thread copy of every component). The trace `content` and a
+   * terminal `stream` handle are still published, since the steps/tree/
+   * breakpoint consumers depend on them.
+   */
+  componentsEnabled?: boolean;
   traceKey?: string;
   content?: Trace;
   context: EventContext;
@@ -79,6 +89,20 @@ export function useTraceStream({
     const total = content.events.length;
     const events = content.events;
     const streamKey = nanoid();
+
+    // Nothing on screen consumes per-step components: publish the content and a
+    // terminal stream handle, then skip the buffers and the whole worker fleet.
+    if (!componentsEnabled) {
+      produceRef.current((l) => {
+        set(l, "source.parsedTrace", {
+          content,
+          stream: { streamKey, total, frontier: total, version: 1, complete: true },
+        });
+        set(l, "viewKey", nanoid());
+      });
+      return;
+    }
+
     const buffers = createStreamBuffers(streamKey, total);
 
     produceRef.current((l) => {
@@ -199,7 +223,7 @@ export function useTraceStream({
     };
     // step is intentionally omitted: it's forwarded via setStep below, not a restart trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, traceKey, contextKey, view, workerCount]);
+  }, [enabled, componentsEnabled, traceKey, contextKey, view, workerCount]);
 
   // Forward the live playhead so workers prioritise the user's neighbourhood.
   useEffect(() => {
