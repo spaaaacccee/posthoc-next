@@ -52,7 +52,7 @@ export const schema: JSONSchema = {
       type: "string",
       enum: ["1.4.0"],
       markdownDescription:
-        "The search trace version. This value dictates whether the legacy or the modern parser is used. Currently, versions below `1.4.0` will use the legacy parser. The legacy format also has no intellisense support.",
+        "The search trace version. Traces below `1.4.0` are converted to `1.4.0` when they are opened, so this is the only version the editor validates against.",
     },
     views: {
       type: "object",

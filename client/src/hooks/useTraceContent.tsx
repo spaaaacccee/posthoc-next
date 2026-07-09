@@ -1,4 +1,5 @@
 import { useSnackbar } from "components/generic/Snackbar";
+import { readTrace } from "components/renderer/parser-v140/readTrace";
 import { find } from "es-toolkit/compat";
 import memo from "memoizee";
 import { useMemo } from "react";
@@ -41,13 +42,17 @@ export function useTraceContent(trace?: UploadedTrace) {
     () =>
       usingLoadingState(async () => {
         if (id) {
+          // `readTrace` upgrades pre-1.4.0 traces. Content that already came in
+          // through an upgrading door (import, source edit, solve) passes
+          // through untouched; this catches connection fetches, and any legacy
+          // trace restored from a workspace saved before the upgrade existed.
           if (content) {
-            return { ...trace, content };
+            return { ...trace, content: readTrace(content) };
           } else {
             const a = await getTrace({ source, id, lastModified });
             return {
               ...trace,
-              content: a,
+              content: readTrace(a),
             };
           }
         }

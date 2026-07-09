@@ -1,3 +1,4 @@
+import { readTrace } from "components/renderer/parser-v140/readTrace";
 import { fileDialog as file } from "file-select-dialog";
 import { find, startCase } from "es-toolkit/compat";
 import { nanoid as id } from "nanoid";
@@ -49,15 +50,10 @@ export function readUploadedTrace(f: File) {
         });
         cast<Trace | undefined>(parsed);
         if (error) throw error;
-        // Shallow-freeze the parsed trace so immer's auto-freeze treats it as an
-        // opaque leaf: `freeze()` early-returns on an already-frozen object and
-        // never recurses, so committing this (huge) event graph to the layers
-        // store no longer deep-freezes all ~700k events on the main thread. O(1)
-        // (freezes only the top object); the events stay mutable and readable.
-        if (parsed) Object.freeze(parsed);
         return {
           ...custom(),
-          content: parsed,
+          // Upgrades pre-1.4.0 traces, and shallow-freezes.
+          content: readTrace(parsed),
           name: startCase(name(f.name)),
           type: customId,
           key: id(),

@@ -2,8 +2,8 @@ import { useTheme } from "@mui/material";
 import interpolate from "color-interpolate";
 import { getColorHex } from "components/renderer/colors";
 import { NodeList } from "components/renderer/NodeList";
+import { normalizeConstant } from "components/renderer/parser-v140/normalize";
 import { parseProperty } from "components/renderer/parser-v140/parseProperty";
-import { parseProperty as parsePropertyLegacy } from "components/renderer/parser/parseProperty";
 import { last } from "es-toolkit";
 import { constant, head, map, startCase } from "es-toolkit/compat";
 import { TraceEvent } from "protocol";
@@ -31,7 +31,6 @@ function getTextWidth(text: string, font: string) {
 }
 const labelSize = 0.8;
 export function use2DPath(layer?: TraceLayer, index: number = 0, step: number = 0) {
-  /// version < 1.4.0 compat
   const { palette } = useTheme();
   const { getPath } = useMemo(
     () =>
@@ -43,17 +42,15 @@ export function use2DPath(layer?: TraceLayer, index: number = 0, step: number = 
   const element = useMemo(() => {
     const n = interpolate([palette.background.paper, palette.text.primary])(0.05);
     const trace = layer?.source?.parsedTrace?.content as any;
-    if (trace?.render?.path || trace?.pivot) {
-      const pivot = trace?.render?.path?.pivot ?? trace?.pivot ?? {};
-      const scale = trace?.render?.path?.scale
-        ? trace.render.path.scale * (1 / 0.3)
-        : (trace?.pivot?.scale ?? 1);
-      const { x, y } = pivot;
+    if (trace?.pivot) {
+      const { x, y, scale = 1 } = trace.pivot;
 
-      const f =
-        trace?.version === "1.4.0"
-          ? parseProperty
-          : (s: string) => (c: Partial<TraceEvent>) => parsePropertyLegacy(s)({ event: c });
+      // LEGACY COMPAT: a pre-1.4.0 pivot reads `$.event.x` rather than `$.x`.
+      // `parseToken`'s alias fallback resolves that off `__internal__`, and
+      // `normalizeConstant` keeps it from being walked as a property tree.
+      const scope = (c: Partial<TraceEvent>) =>
+        normalizeConstant({ ...c, __internal__: { event: c } });
+      const f = (s: string) => (c: Partial<TraceEvent>) => parseProperty(s)(scope(c));
 
       const pivotX = x ? f(x) : (c: Partial<TraceEvent>) => c.x;
       const pivotY = y ? f(y) : (c: Partial<TraceEvent>) => c.y;

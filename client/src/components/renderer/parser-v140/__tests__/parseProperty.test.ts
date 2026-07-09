@@ -19,19 +19,19 @@ describe("parseProperty", () => {
     expect(f({})).toEqual({ a: 1, b: [1, 2] });
   });
   it("parses computed property", () => {
-    const f = parseProperty("{{1}}");
+    const f = parseProperty("${{1}}");
     expect(f({})).toEqual(1);
   });
   it("parses computed with context", () => {
-    const f = parseProperty("{{ctx.a}}");
+    const f = parseProperty("${{ctx.a}}");
     expect(f({ a: 1 })).toEqual(1);
   });
   it("parses computed with nested context", () => {
-    const f = parseProperty("{{ctx.a.b[0]}}");
+    const f = parseProperty("${{ctx.a.b[0]}}");
     expect(f({ a: { b: [1] } })).toEqual(1);
   });
   it("parses string coercion property", () => {
-    const f = parseProperty("a {{ctx.a}}");
+    const f = parseProperty("a ${{ctx.a}}");
     expect(f({ a: 2 })).toEqual("a 2");
   });
 });

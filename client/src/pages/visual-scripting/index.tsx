@@ -199,132 +199,125 @@ export function VisualPage({ template: Page }: PageContentProps) {
         </Page.Options>
         <Page.Content>
           {content ? (
-            content?.version === "1.4.0" ? (
-              <VisualScriptingContext.Provider value={context}>
-                <Box sx={{ width: "100%", height: "100%" }} key={tab}>
-                  {loading ? (
-                    <Spinner message="Loading graph" />
-                  ) : (
-                    <ReactFlowProvider>
-                      <ReactFlow
-                        colorMode={theme.palette.mode}
-                        nodes={nodes}
-                        edges={edges}
-                        nodeTypes={nodeTypes}
-                        onNodesChange={onNodesChange}
-                        onEdgesChange={onEdgesChange}
-                        onConnect={onConnect}
-                        onInit={setRfInstance}
-                        fitView
-                      >
-                        <Controls />
-                        <Background id={id} bgColor={theme.palette.background.paper} />
-                      </ReactFlow>
-                    </ReactFlowProvider>
-                  )}
-                  <Stack
-                    direction="row-reverse"
-                    spacing={1}
-                    sx={{
-                      ...paper(),
-                      ...acrylic,
-                      p: 1,
-                      position: "absolute",
-                      top: 60,
-                      right: 16,
-                      zIndex: 4,
-                    }}
-                  >
-                    <Surface
-                      popover
-                      slotProps={{
-                        paper: { sx: { width: "fit-content" } },
-                        popover: {
-                          anchorOrigin: {
-                            vertical: "bottom",
-                            horizontal: "right",
-                          },
-                        },
-                      }}
-                      trigger={(state) => (
-                        <Button {...bindTrigger(state)} startIcon={<AddOutlined />}>
-                          Add node
-                        </Button>
-                      )}
+            <VisualScriptingContext.Provider value={context}>
+              <Box sx={{ width: "100%", height: "100%" }} key={tab}>
+                {loading ? (
+                  <Spinner message="Loading graph" />
+                ) : (
+                  <ReactFlowProvider>
+                    <ReactFlow
+                      colorMode={theme.palette.mode}
+                      nodes={nodes}
+                      edges={edges}
+                      nodeTypes={nodeTypes}
+                      onNodesChange={onNodesChange}
+                      onEdgesChange={onEdgesChange}
+                      onConnect={onConnect}
+                      onInit={setRfInstance}
+                      fitView
                     >
-                      {(state) => (
-                        <MenuList>
-                          {flow(
-                            [
-                              ...entries(transforms),
-                              ...entries(content?.views).map(
-                                ([k]) =>
-                                  [
-                                    k,
-                                    () => ({
-                                      key: "component",
-                                      title: k,
-                                      group: "components",
-                                      description: undefined as string | undefined,
-                                    }),
-                                  ] as const,
-                              ),
-                            ],
-                            (xs) => xs.map(([k, v]) => [k, v()] as const),
-                            (xs) => groupBy(xs, ([, v]) => v.group),
-                            (groups) => omitBy(groups, (vs, k) => k === "hidden"),
-                            (groups) =>
-                              map(groups, (vs, group) => (
-                                <>
-                                  <MenuItem disabled>
-                                    <Typography variant="overline">{startCase(group)}</Typography>
-                                  </MenuItem>
-                                  {map(vs, ([k, v], i) => (
-                                    <MenuItem
-                                      key={i}
-                                      onClick={() => {
-                                        state.close();
-                                        onChange?.((s) => {
-                                          const id = `n${+new Date()}`;
-                                          s.nodes = s.nodes ?? [];
-                                          s.nodes?.push?.({
-                                            id,
-                                            type: "flow",
-                                            data: { type: k, key: id },
-                                            position: {
-                                              x: Math.random() * 400,
-                                              y: Math.random() * 400,
-                                            },
-                                          });
+                      <Controls />
+                      <Background id={id} bgColor={theme.palette.background.paper} />
+                    </ReactFlow>
+                  </ReactFlowProvider>
+                )}
+                <Stack
+                  direction="row-reverse"
+                  spacing={1}
+                  sx={{
+                    ...paper(),
+                    ...acrylic,
+                    p: 1,
+                    position: "absolute",
+                    top: 60,
+                    right: 16,
+                    zIndex: 4,
+                  }}
+                >
+                  <Surface
+                    popover
+                    slotProps={{
+                      paper: { sx: { width: "fit-content" } },
+                      popover: {
+                        anchorOrigin: {
+                          vertical: "bottom",
+                          horizontal: "right",
+                        },
+                      },
+                    }}
+                    trigger={(state) => (
+                      <Button {...bindTrigger(state)} startIcon={<AddOutlined />}>
+                        Add node
+                      </Button>
+                    )}
+                  >
+                    {(state) => (
+                      <MenuList>
+                        {flow(
+                          [
+                            ...entries(transforms),
+                            ...entries(content?.views).map(
+                              ([k]) =>
+                                [
+                                  k,
+                                  () => ({
+                                    key: "component",
+                                    title: k,
+                                    group: "components",
+                                    description: undefined as string | undefined,
+                                  }),
+                                ] as const,
+                            ),
+                          ],
+                          (xs) => xs.map(([k, v]) => [k, v()] as const),
+                          (xs) => groupBy(xs, ([, v]) => v.group),
+                          (groups) => omitBy(groups, (vs, k) => k === "hidden"),
+                          (groups) =>
+                            map(groups, (vs, group) => (
+                              <>
+                                <MenuItem disabled>
+                                  <Typography variant="overline">{startCase(group)}</Typography>
+                                </MenuItem>
+                                {map(vs, ([k, v], i) => (
+                                  <MenuItem
+                                    key={i}
+                                    onClick={() => {
+                                      state.close();
+                                      onChange?.((s) => {
+                                        const id = `n${+new Date()}`;
+                                        s.nodes = s.nodes ?? [];
+                                        s.nodes?.push?.({
+                                          id,
+                                          type: "flow",
+                                          data: { type: k, key: id },
+                                          position: {
+                                            x: Math.random() * 400,
+                                            y: Math.random() * 400,
+                                          },
                                         });
-                                      }}
-                                    >
-                                      <ListItemText primary={v.title} secondary={v.description} />
-                                    </MenuItem>
-                                  ))}
-                                </>
-                              )),
-                          )}
-                        </MenuList>
-                      )}
-                    </Surface>
+                                      });
+                                    }}
+                                  >
+                                    <ListItemText primary={v.title} secondary={v.description} />
+                                  </MenuItem>
+                                ))}
+                              </>
+                            )),
+                        )}
+                      </MenuList>
+                    )}
+                  </Surface>
 
-                    <Button variant="filled" onClick={onRestore}>
-                      Restore
-                    </Button>
+                  <Button variant="filled" onClick={onRestore}>
+                    Restore
+                  </Button>
 
-                    <Button variant="filled" onClick={onSave}>
-                      Save
-                    </Button>
-                  </Stack>
-                </Box>
-              </VisualScriptingContext.Provider>
-            ) : (
-              <Placeholder
-                label="Unsupported trace version"
-                secondary="The visual scripting editor only supports trace version 1.4.0"
-              />
-            )
+                  <Button variant="filled" onClick={onSave}>
+                    Save
+                  </Button>
+                </Stack>
+              </Box>
+            </VisualScriptingContext.Provider>
           ) : (
             <Placeholder
               label="Open a trace"

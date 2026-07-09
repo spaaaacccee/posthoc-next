@@ -34,9 +34,10 @@ export const service = withProduce(({ value, produce }) => {
 
   const context = useEventContext();
 
-  // v1.4.0 trusted traces stream their components in incrementally; everything
-  // else (legacy formats, untrusted layers) uses the one-shot path below.
-  const streaming = trace?.content?.version === "1.4.0" && isTrusted;
+  // Trusted traces stream their components in incrementally; untrusted layers
+  // use the one-shot path below, which generates nothing. Every trace is
+  // v1.4.0 by this point — `readTrace` upgrades older ones at ingress.
+  const streaming = isTrusted;
 
   // When every mounted renderer drives the shared-store load() path, it builds
   // its own columnar store — so the per-step component fleet is pure waste.
@@ -55,7 +56,7 @@ export const service = withProduce(({ value, produce }) => {
     produce,
   });
 
-  // One-shot parser (legacy / untrusted only). v1.4.0 trusted traces stream.
+  // One-shot parser (untrusted only). Trusted traces stream.
   const { data: parsedTrace } = useTraceParser({
     key: trace?.key,
     trace: trace?.content,

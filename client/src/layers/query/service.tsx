@@ -1,4 +1,5 @@
 import { useSnackbar } from "components/generic/Snackbar";
+import { readTrace } from "components/renderer/parser-v140/readTrace";
 import { useEffectWhenAsync } from "hooks/useEffectWhen";
 import { useMapContent } from "hooks/useMapContent";
 import { inferLayerName } from "layers";
@@ -12,7 +13,6 @@ import { slice } from "slices";
 import { set } from "utils/set";
 import { Controller } from ".";
 import { findConnection } from "./findConnection";
-import { Trace } from "protocol/Trace-v140";
 import { useOne } from "slices/useOne";
 
 export const service = withProduce(({ value, produce, onChange }) => {
@@ -56,7 +56,8 @@ export const service = withProduce(({ value, produce, onChange }) => {
               produce((v) => {
                 set(v, "source.trace", {
                   name: `${algorithmInfo?.name}`,
-                  content: result as Trace | undefined,
+                  // An adapter may still speak a pre-1.4.0 trace format.
+                  content: readTrace(result),
                   key: id(),
                   id: id(),
                 });

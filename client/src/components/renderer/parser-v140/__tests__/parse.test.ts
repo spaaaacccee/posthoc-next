@@ -8,8 +8,8 @@ describe("parse", () => {
     rect: { x: number; y: string; z: number; w: number };
   }>([{ $: "rect2", y: 4 }], {
     rect2: [
-      { $: "rect", x: 2, y: "{{ctx.y + 1}}" },
-      { $: "rect", y: "{{1 + 2}} a", z: "{{1 + 2}}", w: "{{ctx.a}}" },
+      { $: "rect", x: 2, y: "${{ctx.y + 1}}" },
+      { $: "rect", y: "${{1 + 2}} a", z: "${{1 + 2}}", w: "${{ctx.a}}" },
     ],
   })(ctx);
   it("flattens correctly", () => {

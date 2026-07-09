@@ -6,26 +6,17 @@ import { useEffect } from "react";
 import { loading } from "slices/loading";
 import { endpointSymbol } from "vite-plugin-comlink/symbol";
 import { withWorker } from "workers/workerLanes";
-import { ParseTraceWorkerParameters as ParseTraceWorkerLegacyParameters } from "../parser/ParseTraceSlaveWorker";
 import { ParseTraceWorkerParameters, ParseTraceWorkerReturnType } from "./ParseTraceSlaveWorker";
 
-type AnyTrace = ParseTraceWorkerParameters["trace"] | ParseTraceWorkerLegacyParameters["trace"];
+type Trace = ParseTraceWorkerParameters["trace"];
 
 type WorkerModule = typeof import("./parseTrace.worker");
-type LegacyWorkerModule = typeof import("../parser/parseTrace.worker");
 
 // vite-plugin-comlink rewrites `new ComlinkWorker(...)` into a statement ending
 // in `;`, so each MUST sit on its own line (not inside an arrow/expression).
 function spawnWorker() {
   const worker = new ComlinkWorker<WorkerModule>(
     new URL("./parseTrace.worker.ts", import.meta.url),
-  );
-  return worker;
-}
-
-function spawnLegacyWorker() {
-  const worker = new ComlinkWorker<LegacyWorkerModule>(
-    new URL("../parser/parseTrace.worker.ts", import.meta.url),
   );
   return worker;
 }
@@ -38,14 +29,14 @@ const EMPTY_COMPONENTS: ParseTraceWorkerReturnType = {
 };
 
 export type ParsedTrace =
-  | { components: ParseTraceWorkerReturnType; content: AnyTrace }
+  | { components: ParseTraceWorkerReturnType; content: Trace }
   | { error?: string }
   | undefined;
 
 export type ParsedTraceOptions = {
   /** Lightweight cache identity for the trace (its key). */
   key?: string;
-  trace?: AnyTrace;
+  trace?: Trace;
   context: ParseTraceWorkerParameters["context"];
   view?: string;
   /** Untrusted traces skip component generation (empty preview). */
@@ -84,22 +75,13 @@ export const parsedTraceQuery = ({
       notify?.("Processing trace...");
       try {
         const params = { trace, context, view };
-        const output =
-          trace?.version === "1.4.0"
-            ? await withWorker(
-                "trace-gen",
-                spawnWorker,
-                terminate,
-                (w) => w.parseTrace(params as ParseTraceWorkerParameters),
-                { signal },
-              )
-            : await withWorker(
-                "trace-gen",
-                spawnLegacyWorker,
-                terminate,
-                (w) => w.parseTrace(params as ParseTraceWorkerLegacyParameters),
-                { signal },
-              );
+        const output = await withWorker(
+          "trace-gen",
+          spawnWorker,
+          terminate,
+          (w) => w.parseTrace(params),
+          { signal },
+        );
         notify?.("Trace loaded", pluralize("step", output?.stepsPersistent?.length ?? 0, true));
         return { components: output, content: trace };
       } catch (e) {
