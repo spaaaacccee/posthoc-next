@@ -73,3 +73,26 @@ export function buildIndexedGeneration(store: SharedComponentStore): IndexedGene
 export function openIndex(index: SharedArrayBuffer): Flatbush {
   return Flatbush.from(index);
 }
+
+export type QueryBounds = { top: number; left: number; right: number; bottom: number };
+
+/**
+ * Store indices of bodies overlapping `bounds` AND visible at `step`
+ * (`start <= step < end`), sorted ascending so draw order matches the stable
+ * body index. This is the render-time intersection of the spatial query and the
+ * decoupled visibility span — O(candidates in tile), no global scan.
+ */
+export function queryVisible(
+  store: SharedComponentStore,
+  fb: Flatbush,
+  bounds: QueryBounds,
+  step: number,
+): number[] {
+  const hits = fb.search(bounds.left, bounds.top, bounds.right, bounds.bottom);
+  const out: number[] = [];
+  for (const i of hits) {
+    if (store.start[i]! <= step && step < store.end[i]!) out.push(i);
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
