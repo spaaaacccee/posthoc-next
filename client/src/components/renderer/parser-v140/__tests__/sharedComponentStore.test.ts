@@ -161,35 +161,94 @@ describe("buildSharedComponentStore ragged points (path/polygon)", () => {
 });
 
 describe("buildSharedComponentStore text", () => {
-  it("packs a text body: anchor + font size, interned label + colour, alpha 1", () => {
+  // No trace emits `$: "text"` — a label is an attribute of a primitive, and v1
+  // rasterizes it by overdrawing the component a second time as text. So a
+  // labelled component must pack as *two* bodies.
+  const labelled = (extra: Record<string, unknown> = {}) => ({
+    $: "circle",
+    x: 50,
+    y: 60,
+    radius: 4,
+    fill: "red",
+    alpha: 0.5,
+    label: "hi",
+    "label-size": 10,
+    "label-color": "cyan",
+    ...extra,
+  });
+
+  const oneStep = (component: Record<string, unknown>, key: "persistent" | "special") =>
+    buildSharedComponentStore({
+      gen: () =>
+        ({
+          event: { id: 0, type: "e" } as TraceEvent,
+          components: { persistent: [], transient: [], special: [], [key]: [entry(component)] },
+        }) as SingleFrame,
+      total: 1,
+    });
+
+  it("packs a labelled primitive as primitive + text body", () => {
+    const store = oneStep(labelled(), "persistent");
+    expect(store.count).toBe(2);
+    expect(Array.from(store.kind)).toEqual([1, 4]); // circle, text
+
+    // The primitive keeps its own fill and alpha, and carries no label.
+    expect(store.palette[store.fill[0]!]).toBe("red");
+    expect(store.alpha[0]).toBe(0.5);
+    expect(store.label[0]).toBe(0);
+
+    // The text body is opaque, in `label-color`, anchored on the primitive.
+    expect([store.x[1], store.y[1]]).toEqual([50, 60]);
+    expect(store.size[1]).toBe(10);
+    expect(store.strings[store.label[1]!]).toBe("hi");
+    expect(store.palette[store.fill[1]!]).toBe("cyan");
+    expect(store.alpha[1]).toBe(1);
+  });
+
+  it("offsets the text body by label-x/label-y", () => {
+    const store = oneStep(labelled({ "label-x": 3, "label-y": -7 }), "persistent");
+    expect([store.x[1], store.y[1]]).toEqual([53, 53]);
+  });
+
+  it("reads the pre-1.4.0 `text` spelling", () => {
+    const store = oneStep(labelled({ label: undefined, text: "old" }), "persistent");
+    expect(store.strings[store.label[1]!]).toBe("old");
+  });
+
+  it("skips the text body when there is no label", () => {
+    const store = oneStep(labelled({ label: undefined }), "persistent");
+    expect(store.count).toBe(1);
+    expect(Array.from(store.kind)).toEqual([1]);
+  });
+
+  it("omits labels when `text` is excluded, keeping the primitive", () => {
+    const store = buildSharedComponentStore({
+      gen: () =>
+        ({
+          event: { id: 0, type: "e" } as TraceEvent,
+          components: { persistent: [entry(labelled())], transient: [], special: [] },
+        }) as SingleFrame,
+      total: 1,
+      include: new Set(["circle"]),
+    });
+    expect(Array.from(store.kind)).toEqual([1]);
+  });
+
+  it("clears a special's text body along with its primitive", () => {
     const gen = (i: number): SingleFrame =>
       ({
-        event: { id: i, type: "e" } as TraceEvent,
+        event: { id: 0, type: i === 0 ? "e" : "done" } as TraceEvent,
         components: {
-          persistent:
-            i === 0
-              ? [
-                  entry({
-                    $: "text",
-                    x: 50,
-                    y: 60,
-                    label: "hi",
-                    "label-size": 10,
-                    "label-color": "cyan",
-                  }),
-                ]
-              : [],
+          persistent: [],
           transient: [],
-          special: [],
+          special: i === 0 ? [entry(labelled({ clear: "done" }))] : [],
         },
       }) as SingleFrame;
-    const store = buildSharedComponentStore({ gen, total: 1 });
-    expect(store.kind[0]).toBe(4); // text
-    expect([store.x[0], store.y[0]]).toEqual([50, 60]);
-    expect(store.size[0]).toBe(10);
-    expect(store.strings[store.label[0]!]).toBe("hi");
-    expect(store.palette[store.fill[0]!]).toBe("cyan");
-    expect(store.alpha[0]).toBe(1);
+    const store = buildSharedComponentStore({ gen, total: 3 });
+    expect(store.count).toBe(2);
+    // Both bodies share the span, so the label can't outlive its primitive.
+    expect(Array.from(store.start)).toEqual([0, 0]);
+    expect(Array.from(store.end)).toEqual([1, 1]);
   });
 });
 

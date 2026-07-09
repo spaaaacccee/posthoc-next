@@ -287,7 +287,9 @@ export class D2RendererV2 extends D2RendererBase {
 }
 
 export default makeRenderer(D2RendererV2, {
-  components: ["rect", "circle", "path", "polygon", "text"],
+  // Component `$` kinds, as in v1. Labels are drawn (as their own store bodies),
+  // but `text` is an attribute of these components, never a `$` of its own.
+  components: ["rect", "circle", "path", "polygon"],
   id: "d2-renderer",
   name: "Pixel",
   description: "Comfortably performant 2D renderer",

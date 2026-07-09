@@ -27,7 +27,13 @@ const KIND_INDEX: Record<string, number> = Object.fromEntries(
   COMPONENT_KINDS.map((k, i) => [k, i]),
 );
 
-/** Rasterizable kinds packed by default. */
+/**
+ * Rasterizable kinds packed by default. Note `text` is not a component `$` — no
+ * trace emits `$: "text"`. It's a *label attached to* another component, and
+ * appears here as a pseudo-kind toggling whether labels are packed as their own
+ * bodies (see `pushBody`), mirroring v1's `draw()`, which rasterizes the
+ * primitive and then overdraws its label.
+ */
 export const DEFAULT_INCLUDE: ReadonlySet<string> = new Set([
   "rect",
   "circle",
@@ -99,8 +105,12 @@ function allocStore(
  * count known only after the pass), interns colours and label strings, and packs
  * ragged path/polygon points. `setEnd` lets the caller back-patch a special's
  * span end once its clear event is seen.
+ *
+ * One component may pack as *two* bodies — its primitive and, if it carries a
+ * label, a text body sharing the same span — so `pushBody` returns every index
+ * it wrote.
  */
-function createPacker() {
+function createPacker(include: ReadonlySet<string>) {
   const kind: number[] = [];
   const x: number[] = [];
   const y: number[] = [];
@@ -128,13 +138,10 @@ function createPacker() {
     return idx;
   };
 
-  const pushBody = (c: Record<string, any>, s: number, e: number): number => {
+  const pushPrimitive = (c: Record<string, any>, s: number, e: number): number => {
     const bi = kind.length;
     kind.push(KIND_INDEX[c.$] ?? 0);
     let np = 0;
-    let lbl = 0;
-    let a = c.alpha ?? 1;
-    let color: string = c.fill ?? GREY;
 
     if (c.$ === "circle") {
       x.push(c.x ?? 0);
@@ -151,18 +158,6 @@ function createPacker() {
       const points = Array.isArray(c.points) ? c.points : [];
       for (const p of points) pts.push(p?.x ?? 0, p?.y ?? 0);
       np = points.length;
-    } else if (c.$ === "text") {
-      // Anchor folds the label offset into x/y; `size` = font size, `size2` = an
-      // estimated pixel width used only for the bbox. v1 draws labels at alpha 1.
-      const fontSize = c["label-size"] ?? c.fontSize ?? 4;
-      const str = String(c.label ?? c.text ?? "");
-      x.push((c.x ?? 0) + (c["label-x"] ?? c.textX ?? 0));
-      y.push((c.y ?? 0) + (c["label-y"] ?? c.textY ?? 0));
-      size.push(fontSize);
-      size2.push(str.length * fontSize * 0.6);
-      lbl = intern(strings, stringIndex, str);
-      color = c["label-color"] ?? c.fontColor ?? "grey";
-      a = 1;
     } else {
       // rect
       x.push(c.x ?? 0);
@@ -171,13 +166,53 @@ function createPacker() {
       size2.push(c.height ?? 0);
     }
 
-    alpha.push(a);
-    fill.push(intern(palette, paletteIndex, color ?? ""));
-    label.push(lbl);
+    alpha.push(c.alpha ?? 1);
+    fill.push(intern(palette, paletteIndex, c.fill ?? GREY));
+    label.push(0);
     start.push(s);
     spanEnd.push(e);
     ptOff.push(ptOff[ptOff.length - 1]! + np);
     return bi;
+  };
+
+  /**
+   * A component's label, packed as its own body. Anchored at the primitive's
+   * `(x, y)` plus the label offset, matching `primitives.text.draw`; `size` is
+   * the font size and `size2` an estimated pixel width used only for the bbox.
+   * v1 draws labels opaque, in `label-color`, ignoring the component's fill and
+   * alpha.
+   */
+  const pushText = (c: Record<string, any>, s: number, e: number, str: string): number => {
+    const bi = kind.length;
+    kind.push(KIND_INDEX.text!);
+    const fontSize = c["label-size"] ?? c.fontSize ?? 4;
+    x.push((c.x ?? 0) + (c["label-x"] ?? c.textX ?? 0));
+    y.push((c.y ?? 0) + (c["label-y"] ?? c.textY ?? 0));
+    size.push(fontSize);
+    size2.push(str.length * fontSize * 0.6);
+    alpha.push(1);
+    fill.push(intern(palette, paletteIndex, c["label-color"] ?? c.fontColor ?? "grey"));
+    label.push(intern(strings, stringIndex, str));
+    start.push(s);
+    spanEnd.push(e);
+    ptOff.push(ptOff[ptOff.length - 1]!);
+    return bi;
+  };
+
+  /**
+   * Pack `c` as up to two bodies sharing one span: its primitive, and its label
+   * if it has one. Returns the indices written — none, if `include` excludes
+   * both. The caller needs all of them to back-patch a special's span end.
+   */
+  const pushBody = (c: Record<string, any>, s: number, e: number): number[] => {
+    const out: number[] = [];
+    if (include.has(c.$)) out.push(pushPrimitive(c, s, e));
+    /// version < 1.4.0 compat: `text` is the old spelling of `label`.
+    const str = c.label ?? c.text;
+    if (include.has("text") && str !== undefined && str !== null && str !== "") {
+      out.push(pushText(c, s, e, String(str)));
+    }
+    return out;
   };
 
   const setEnd = (bi: number, e: number) => {
@@ -217,7 +252,7 @@ export function buildSharedComponentStore({
   include = DEFAULT_INCLUDE,
 }: BuildComponentStoreParams): SharedComponentStore {
   const end = Math.min(prefixEnd, total);
-  const { pushBody, setEnd, build } = createPacker();
+  const { pushBody, setEnd, build } = createPacker(include);
 
   // clearKey -> body indices of specials awaiting that clear event.
   const stack = new Map<string, number[]>();
@@ -236,20 +271,18 @@ export function buildSharedComponentStore({
 
     // 2. Emit this step's bodies.
     const cs = frame.components;
-    for (const entry of cs.persistent ?? []) {
-      if (include.has(entry.component.$)) pushBody(entry.component, i, total);
-    }
-    for (const entry of cs.transient ?? []) {
-      if (include.has(entry.component.$)) pushBody(entry.component, i, i + 1);
-    }
+    for (const entry of cs.persistent ?? []) pushBody(entry.component, i, total);
+    for (const entry of cs.transient ?? []) pushBody(entry.component, i, i + 1);
     for (const entry of cs.special ?? []) {
       const c = entry.component;
-      if (!include.has(c.$)) continue;
-      const bi = pushBody(c, i, total); // end defaults to `total` until cleared
+      // end defaults to `total` until cleared; a labelled component packs two
+      // bodies, and both must be cleared together.
+      const bodies = pushBody(c, i, total);
+      if (!bodies.length) continue;
       const key = makeKey(e?.id, c.clear);
       const arr = stack.get(key);
-      if (arr) arr.push(bi);
-      else stack.set(key, [bi]);
+      if (arr) arr.push(...bodies);
+      else stack.set(key, bodies);
     }
   }
 
@@ -268,10 +301,9 @@ export function buildStaticComponentStore(
     include = DEFAULT_INCLUDE,
   }: { generation?: number; include?: ReadonlySet<string> } = {},
 ): SharedComponentStore {
-  const { pushBody, build } = createPacker();
+  const { pushBody, build } = createPacker(include);
   for (const entry of components) {
-    const c = entry?.component;
-    if (c && include.has(c.$)) pushBody(c, 0, STATIC_END);
+    if (entry?.component) pushBody(entry.component, 0, STATIC_END);
   }
   return build(1, generation);
 }
