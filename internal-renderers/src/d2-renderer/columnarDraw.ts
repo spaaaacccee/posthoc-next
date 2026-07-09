@@ -27,7 +27,10 @@ export function columnarDrawTransform(
 ): DrawTransform {
   const sx = tile.width / (bounds.right - bounds.left);
   const sy = tile.height / (bounds.bottom - bounds.top);
-  return { sx, sy, x: -bounds.left * sx, y: -bounds.top * sy };
+  // Negating a zero origin yields -0, which is a distinct value under Object.is
+  // (and so leaks into hashes/comparisons). Normalise it.
+  const norm = (v: number) => (v === 0 ? 0 : v);
+  return { sx, sy, x: norm(-bounds.left * sx), y: norm(-bounds.top * sy) };
 }
 
 /** Minimal 2D context surface used by `drawBody` (real or stubbed in tests). */

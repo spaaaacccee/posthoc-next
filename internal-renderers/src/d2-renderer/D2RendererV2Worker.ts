@@ -1,3 +1,4 @@
+import { isEqual } from "es-toolkit";
 import { once, throttle } from "es-toolkit/compat";
 import type { Bounds, Point, Size } from "protocol";
 import type { LayerParams, SharedComponentStore } from "renderer";
@@ -75,6 +76,10 @@ export class D2RendererV2Worker extends EventEmitter<
   }
 
   setTileResolution(tileResolution: Size) {
+    // Guard on change: the dynamic-resolution ticker calls this every interval,
+    // and an unconditional cache clear + invalidate would re-rasterize every
+    // tile on every tick.
+    if (isEqual(tileResolution, this.#options.tileResolution)) return;
     this.#options = { ...this.#options, tileResolution };
     this.#cache.clear();
     this.#invalidate();
@@ -185,16 +190,24 @@ export class D2RendererV2Worker extends EventEmitter<
     const { top, right, bottom, left } = bounds;
 
     // Visible bodies per layer + a content hash over (generation, visible ids).
-    // A sentinel (-1) separates layers so distinct splits can't collide.
+    // Folded incrementally (FNV-1a): a tile can hold hundreds of thousands of
+    // bodies, so neither spreading them into an array nor hashing that array is
+    // viable — `push(...indices)` overflows the argument stack outright.
     const perLayer = layers.map((l) => ({
       l,
       indices: queryVisible(l.store, l.fb!, { top, left, right, bottom }, this.#step),
     }));
-    const hashInput: number[] = [];
+    let h = 0x811c9dc5;
+    const mix = (v: number) => {
+      h = Math.imul(h ^ (v >>> 0), 0x01000193) >>> 0;
+    };
     for (const { l, indices } of perLayer) {
-      hashInput.push(-1, l.generation, indices.length, ...indices);
+      mix(0xffffffff); // layer separator, so distinct splits can't collide
+      mix(l.generation);
+      mix(indices.length);
+      for (const i of indices) mix(i);
     }
-    const nextHash = hash(hashInput);
+    const nextHash = h.toString(36);
     const tileKey = hash([top, right, bottom, left, tile.width, tile.height]);
 
     const prev = this.#cache.get(tileKey);
