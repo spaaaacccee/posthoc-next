@@ -1,18 +1,16 @@
 import { useTheme } from "@mui/material";
 import { PlaybackService } from "components/app-bar/Playback";
 import { useUntrustedLayers } from "components/inspector/useUntrustedLayers";
-import { colorsHex } from "components/renderer/colors";
 import { useTraceParser } from "components/renderer/parser-v140/parseTrace";
 import { useTraceContent } from "hooks/useTraceContent";
-import { mapValues } from "es-toolkit/compat";
 import { nanoid } from "nanoid";
 import { Trace } from "protocol/Trace-v140";
 import { withProduce } from "produce";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { BreakpointService } from "services/BreakpointService";
-import { AccentColor, accentColors, getShade } from "theme";
 import { set } from "utils/set";
 import { Controller } from "./types";
+import { useEventContext } from "./useEventContext";
 import { useTraceStream } from "./useTraceStream";
 
 export const service = withProduce(({ value, produce }) => {
@@ -27,23 +25,7 @@ export const service = withProduce(({ value, produce }) => {
   }, [trace?.key, trace?.content?.events?.length]);
   const { isTrusted } = useUntrustedLayers();
 
-  const context = useMemo(
-    () => ({
-      theme: {
-        foreground: palette.text.primary,
-        background: palette.background.paper,
-        accent: palette.primary.main,
-      },
-      color: {
-        ...colorsHex,
-        ...mapValues(accentColors, (_, v: AccentColor) => getShade(v, palette.mode, 500, 400)),
-      },
-      themeAccent: palette.primary.main,
-      themeTextPrimary: palette.text.primary,
-      themeBackground: palette.background.paper,
-    }),
-    [palette],
-  );
+  const context = useEventContext();
 
   // v1.4.0 trusted traces stream their components in incrementally; everything
   // else (legacy formats, untrusted layers) uses the one-shot path below.

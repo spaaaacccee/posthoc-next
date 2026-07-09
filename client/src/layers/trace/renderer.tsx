@@ -1,14 +1,19 @@
 import { map, merge } from "es-toolkit/compat";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useThrottle } from "react-use";
 
+import { useRendererInstance } from "components/inspector/TraceRenderer";
 import { NodeList, PersistentNodes } from "components/renderer/NodeList";
+import { buildComponentStore } from "components/renderer/parser-v140/componentStoreClient";
 import { StreamingPersistentNodes } from "components/renderer/StreamingPersistentNodes";
-import { ComponentEntry } from "renderer";
+import { useTraceContent } from "hooks/useTraceContent";
+import { Trace } from "protocol/Trace-v140";
+import { ComponentEntry, SourceHandle } from "renderer";
 import { TraceLayer } from "./TraceLayer";
 import { getStreamBuffers, TraceStreamHandle } from "./traceStreamStore";
 import { Controller } from "./types";
 import { use2DPath } from "./use2DPath";
+import { useEventContext } from "./useEventContext";
 
 export interface RendererProps {
   layer?: TraceLayer;
@@ -125,11 +130,67 @@ function LegacyRenderer({ layer, index }: RendererProps) {
   );
 }
 
-export const renderer = (({ layer, index }) => {
+/**
+ * Load-based feed for renderers advertising `supportsLoad` (d2-renderer-v2).
+ * Instead of streaming per-step component chunks via `add()`, it builds the
+ * whole trace into a shared columnar store once and `load()`s it, then drives
+ * visibility with `setStep`. Streaming preview is deliberately second-class:
+ * nothing renders until the (off-main) build completes.
+ */
+function LoadRenderer({ layer }: RendererProps) {
+  const { renderer } = useRendererInstance();
+  const context = useEventContext();
+  const { result: trace } = useTraceContent(layer?.source?.trace);
+  const content = trace?.content as Trace | undefined;
+  const traceKey = trace?.key;
+  const step = useThrottle(layer?.source?.step ?? 0, 1000 / 60);
+
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  const contextKey = JSON.stringify(context ?? {});
+
+  useEffect(() => {
+    if (!renderer?.load || !content?.events?.length) return;
+    const controller = new AbortController();
+    let handle: SourceHandle | undefined;
+    (async () => {
+      const store = await buildComponentStore({
+        trace: content,
+        context,
+        view: "main",
+        traceKey,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || !store || !renderer.load) return;
+      handle = renderer.load(store);
+      renderer.setStep?.(stepRef.current);
+    })();
+    return () => {
+      controller.abort();
+      if (handle) renderer.unload?.(handle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderer, content, contextKey, traceKey]);
+
+  useEffect(() => {
+    renderer?.setStep?.(step);
+  }, [renderer, step]);
+
+  return <></>;
+}
+
+function RendererDispatch({ layer, index }: RendererProps) {
+  const { renderer } = useRendererInstance();
   const stream = layer?.source?.parsedTrace?.stream;
+  // Prefer the shared-store path when the active renderer supports it.
+  if (renderer?.load) return <LoadRenderer layer={layer} index={index} />;
   return stream ? (
     <StreamingRenderer layer={layer} index={index} stream={stream} />
   ) : (
     <LegacyRenderer layer={layer} index={index} />
   );
-}) satisfies Controller["renderer"];
+}
+
+export const renderer = (({ layer, index }) => (
+  <RendererDispatch layer={layer} index={index} />
+)) satisfies Controller["renderer"];

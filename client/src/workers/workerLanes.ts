@@ -26,7 +26,8 @@ export type LaneName =
   | "hash"
   | "compress"
   | "map-parse"
-  | "breakpoint";
+  | "breakpoint"
+  | "component-store";
 
 const { max, floor } = Math;
 
@@ -131,6 +132,7 @@ function laneCap(name: LaneName, workerCount: number): number {
     case "hash":
     case "compress":
     case "breakpoint":
+    case "component-store":
       return 1;
   }
 }
