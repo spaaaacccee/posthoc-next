@@ -1,6 +1,6 @@
 import { chunk, flatten } from "es-toolkit";
 import { identity, maxBy, minBy } from "es-toolkit/compat";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { Point } from "protocol";
 import { ParsedMap } from "../Parser";
 
@@ -46,7 +46,7 @@ export function parsePoly({
   const ab = aabb(flatten(polys).map(([x, y]) => ({ x, y })));
   return {
     bounds: ab,
-    log: [`${pluralize("face", polys.length, true)}`],
+    log: [`${pluralize("face", polys.length)}`],
     nodes: [
       ...enclosures.map((xs) => ({
         $: "path",

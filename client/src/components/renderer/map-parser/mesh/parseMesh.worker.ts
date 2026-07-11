@@ -1,5 +1,5 @@
 import { identity, maxBy, minBy } from "es-toolkit/compat";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { Point } from "protocol";
 import { ParsedMap } from "../Parser";
 
@@ -53,7 +53,7 @@ export function parseMesh({
   const ab = aabb(vertices.map(([x, y]) => ({ x, y })));
   return {
     bounds: ab,
-    log: [`${pluralize("face", tris.length, true)}`],
+    log: [`${pluralize("face", tris.length)}`],
     nodes: tris
       .map((points) => ({
         $: "polygon",

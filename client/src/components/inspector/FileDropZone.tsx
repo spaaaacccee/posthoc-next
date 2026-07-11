@@ -5,7 +5,7 @@ import { useWorkspace } from "hooks/useWorkspace";
 import { getControllers } from "layers/layerControllers";
 import { head, toPairs as entries } from "es-toolkit/compat";
 import { nanoid as id } from "nanoid";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { useState } from "react";
 import { FileDrop } from "react-file-drop";
 import { slice } from "slices";
@@ -38,7 +38,7 @@ export function useFileImport() {
     if (totalClaimed) return;
     const success = await loadWorkspace(head(fs));
     if (success) return;
-    notify(`Couldn't open ${fs.length} of ${pluralize("file", fs.length, true)}`);
+    notify(`Couldn't open ${fs.length} of ${pluralize("file", fs.length)}`);
   };
 }
 
@@ -58,7 +58,7 @@ export function FileDropZone() {
         <Stack spacing={4} sx={{ alignItems: "center" }}>
           <WorkspacesOutlined />
           <Type component="div" variant="body2" color="textSecondary">
-            {itemCount ? `Import ${pluralize("item", itemCount, true)}` : ""}
+            {itemCount ? `Import ${pluralize("item", itemCount)}` : ""}
           </Type>
         </Stack>
       </Backdrop>

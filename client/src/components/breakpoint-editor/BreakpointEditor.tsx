@@ -24,7 +24,7 @@ import { idle } from "utils/idle";
 import { set } from "utils/set";
 import handlersCollection from "./breakpoints";
 import { BreakpointFieldProps } from "./breakpoints/Breakpoint";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { FiberManualRecord } from "@mui/icons-material";
 import { useOne } from "slices/useOne";
 
@@ -76,7 +76,7 @@ function BreakpointStatusDisplay<L extends Layer<DebugLayerData>>({
         </Tooltip>
       ) : output.length ? (
         <Box component="span">
-          <Dot color="error.main" /> {pluralize("violation", output.length, true)}
+          <Dot color="error.main" /> {pluralize("violation", output.length)}
         </Box>
       ) : (
         <Box component="span">

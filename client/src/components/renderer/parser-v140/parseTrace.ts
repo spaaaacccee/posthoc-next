@@ -1,7 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useSnackbar } from "components/generic/Snackbar";
 import { get } from "es-toolkit/compat";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { useEffect } from "react";
 import { loading } from "slices/loading";
 import { endpointSymbol } from "vite-plugin-comlink/symbol";
@@ -69,7 +69,7 @@ export const parsedTraceQuery = ({
     queryFn: async ({ signal }): Promise<ParsedTrace> => {
       if (!trace) return undefined;
       if (!trusted) {
-        notify?.("Trace loaded", pluralize("step", trace?.events?.length ?? 0, true));
+        notify?.("Trace loaded", pluralize("step", trace?.events?.length ?? 0));
         return { content: trace, components: EMPTY_COMPONENTS };
       }
       notify?.("Processing trace...");
@@ -82,7 +82,7 @@ export const parsedTraceQuery = ({
           (w) => w.parseTrace(params),
           { signal },
         );
-        notify?.("Trace loaded", pluralize("step", output?.stepsPersistent?.length ?? 0, true));
+        notify?.("Trace loaded", pluralize("step", output?.stepsPersistent?.length ?? 0));
         return { components: output, content: trace };
       } catch (e) {
         console.error(e);

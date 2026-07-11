@@ -1,6 +1,6 @@
 import { clamp, last, mean, noop } from "es-toolkit";
 import { groupBy, head, mapValues, maxBy, minBy } from "es-toolkit/compat";
-import pluralize from "pluralize";
+import { pluralize } from "utils/plural";
 import { Point } from "protocol";
 import { ParsedMap } from "../Parser";
 import { flow } from "utils/flow";
@@ -122,7 +122,7 @@ export function parseNetwork({
   return {
     bounds: ab,
     log: [
-      `${verts.length} vertices, ${pluralize("edge", optimizedEdges.length, true)}, ${(
+      `${verts.length} vertices, ${pluralize("edge", optimizedEdges.length)}, ${(
         (optimizedEdges.length * 100) /
         (edges.length ?? 1)
       ).toFixed(2)}% of original`,
