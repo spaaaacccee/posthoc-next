@@ -1,7 +1,7 @@
 import { defaultD2RendererOptions } from "d2-renderer/D2RendererOptions";
 import { D2RendererV2Worker, D2V2WorkerEvent } from "d2-renderer/D2RendererV2Worker";
 import type { SharedComponentStore } from "renderer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const f32 = (a: number[]) => {
   const t = new Float32Array(new SharedArrayBuffer(a.length * 4));
@@ -205,6 +205,81 @@ describe("D2RendererV2Worker", () => {
       worker.render();
 
       expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+    });
+  });
+
+  // The tile cache records what the *main thread* holds, not what this worker
+  // rasterized — that is why a hit ships a hash and no bitmap. The main thread
+  // evicts tiles (TILE_BUDGET), so it can lose one the worker still believes it
+  // has, and every render then agrees the content is unchanged and declines to
+  // send it: a placeholder that no amount of panning heals, only a scrub.
+  describe("dropTiles", () => {
+    it("re-sends a tile the main thread evicted, though its content never changed", () => {
+      const worker = makeWorker();
+      const store = makeStore(); // invariant: the same content at every step
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      const first = capture(worker);
+      worker.render();
+
+      const evicted = updates(first).find((e) => e.payload.bitmap)!.payload.bounds;
+
+      // Baseline: unchanged content, so the worker declines to re-send it.
+      const before = capture(worker);
+      worker.render();
+      expect(updates(before).find((e) => key(e.payload.bounds) === key(evicted))?.bitmap).toBe(
+        undefined,
+      );
+
+      // The main thread evicted it and said so — now it must come back.
+      const after = capture(worker);
+      worker.dropTiles([evicted]);
+      worker.render();
+      const resent = updates(after).find((e) => key(e.payload.bounds) === key(evicted));
+      expect(resent?.payload.bitmap).toBeDefined();
+    });
+
+    it("renders on its own, without waiting for the next camera move", async () => {
+      vi.useFakeTimers();
+      try {
+        const settle = () =>
+          vi.advanceTimersByTimeAsync(defaultD2RendererOptions.refreshInterval * 2);
+        const worker = makeWorker();
+        const store = makeStore();
+        const events = capture(worker);
+        worker.setLayer("a", { store, generation: store.generation });
+        worker.buildLayerIndex("a");
+        await settle(); // let the renders that loading scheduled land, and cache their tiles
+
+        const evicted = updates(events).find((e) => e.payload.bitmap)!.payload.bounds;
+        events.length = 0;
+        await settle();
+        expect(events).toHaveLength(0); // quiescent: nothing is pending
+
+        worker.dropTiles([evicted]);
+        // No render() call. An eviction is acknowledged *after* the pan that caused
+        // it, so a worker that only re-rasterized on the next frustum change would
+        // leave the hole on screen until the user happened to move the camera again.
+        await settle();
+
+        expect(updates(events).some((e) => key(e.payload.bounds) === key(evicted))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores tiles it never rendered", () => {
+      const worker = makeWorker();
+      const store = makeStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.render();
+      const cached = worker.cacheSize;
+      expect(cached).toBeGreaterThan(0);
+
+      // Bounds belonging to another worker's stride, or to no tile at all.
+      worker.dropTiles([{ top: -1e6, left: -1e6, bottom: -1e6 + 1, right: -1e6 + 1 }]);
+      expect(worker.cacheSize).toBe(cached);
     });
   });
 

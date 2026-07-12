@@ -32,7 +32,14 @@ function tileHash(bounds: Bounds) {
  */
 class Tile extends PIXI.Sprite {
   static age: number = 0;
+  /** Last use, as a monotonic tick — eviction takes the least recently used. Bump
+   * it on *use*, not just on repaint: a tile whose content stops changing (a map
+   * layer, a paused playhead) would otherwise grow arbitrarily old while it is
+   * sitting on screen, and get evicted out from under the viewport. */
   age: number = Tile.age++;
+  touch() {
+    this.age = Tile.age++;
+  }
   /** Whether a worker has rasterized this tile's current content. */
   resolved: boolean = false;
   #update(texture: PIXI.Texture, hash: string) {
@@ -43,7 +50,7 @@ class Tile extends PIXI.Sprite {
     };
     this.texture = texture;
     this.setTransform(this.bounds.left, this.bounds.top, scale.x, scale.y);
-    this.age = Tile.age++;
+    this.touch();
     this.hash = hash;
     // `super(texture)` already assigned the same texture on the ctor path.
     if (prev && prev !== texture && prev !== PIXI.Texture.EMPTY) prev.destroy(true);
@@ -320,26 +327,48 @@ export class D2RendererV2 extends D2RendererBase {
         this.#tileIndex.set(tileKey, tile);
         this.#evictTiles();
       }
+    } else if (!tile) {
+      // A bitmap-less update means "unchanged — you already have this one", but we
+      // don't: we evicted it, and the worker hasn't been told (or was told after it
+      // had already answered). Ask again, or the tile stays a placeholder forever —
+      // nothing else will ever change its content hash except the playhead moving.
+      this.#dropTiles([bounds]);
     }
-    if (tile) tile.resolved = true;
+    if (tile) {
+      tile.resolved = true;
+      tile.touch();
+    }
     this.#getUpdateGridQueue()();
   }
 
-  /** Drop the oldest tiles once we're over budget, destroying their textures. */
+  /**
+   * Drop the least recently used tiles once we're over budget, destroying their
+   * textures — and tell the workers, whose content-hash cache is a record of what
+   * *we* hold. A worker that still believes we have a tile will never re-send it.
+   */
   #evictTiles() {
     if (!this.viewport) return;
     const frustum = getTiles(this.viewport, this.options.tileSubdivision, false).tiles.length;
     const budget = Math.max(MIN_TILE_BUDGET, frustum * TILE_BUDGET);
+    const dropped: Bounds[] = [];
     while (this.#tileIndex.size > budget) {
       let oldest: Tile | undefined;
       for (const t of this.#tileIndex.values()) {
         if (!oldest || t.age < oldest.age) oldest = t;
       }
-      if (!oldest) return;
+      if (!oldest) break;
       this.#tileIndex.delete(oldest.key);
       this.#tiles?.removeChild(oldest);
+      dropped.push(oldest.bounds);
       oldest.destroy();
     }
+    if (dropped.length) this.#dropTiles(dropped);
+  }
+
+  /** Tiles we no longer hold. Broadcast: only the worker that owns a given tile
+   * has it cached, and only that worker will re-render it. */
+  #dropTiles(bounds: Bounds[]) {
+    this.#workers.forEach((w) => w.call("dropTiles", [bounds]));
   }
 
   #getUpdateGridQueue = once(() =>
@@ -358,6 +387,9 @@ export class D2RendererV2 extends D2RendererBase {
     let numResolved = 0;
     for (const { bounds: b } of tiles) {
       const t = this.#tileIndex.get(tileHash(b));
+      // On screen — so, in use. Keeps the frustum out of reach of the evictor,
+      // which would otherwise be free to take a tile the user is looking at.
+      t?.touch();
       if (t?.resolved) {
         t.zIndex = 1;
         t.visible = true;

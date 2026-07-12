@@ -68,6 +68,11 @@ type OpenLayer = Generation & {
 
 const MAX_TILE_CACHE = 512;
 
+/** A tile's identity: its bounds. Its *size* in pixels is a property of the
+ * raster, not of the tile, so it belongs in the cached value — where the
+ * "already have it at this size or better" check below reads it. */
+const tileKey = ({ top, right, bottom, left }: Bounds) => hash([top, right, bottom, left]);
+
 /**
  * Cached rasters per step-invariant layer, per worker. A deliberate
  * memory-for-time trade: at dpr 2 a tile is 512², so an entry is ~1MB. What it
@@ -225,6 +230,29 @@ export class D2RendererV2Worker extends EventEmitter<
   }
 
   /**
+   * Forget these tiles, and render them again.
+   *
+   * `#cache` is not a record of what this worker rasterized — it is a record of
+   * *what the main thread already has*, which is the whole reason a hit ships a
+   * hash and no bitmap. The main thread evicts tiles (see `TILE_BUDGET`), so that
+   * belief goes stale, and a stale belief here is permanent: the tile is missing
+   * on screen, every subsequent render agrees its content is unchanged, and so
+   * none of them ever sends it. That is a placeholder that survives any amount of
+   * panning and only heals when the playhead moves — a scrub is the one thing
+   * that changes the content hash.
+   *
+   * It re-renders rather than merely forgetting because a tile the main thread has
+   * dropped is one it needs *now*: the eviction is acknowledged after the pan that
+   * caused it, so waiting for the next camera move would leave the hole on screen.
+   */
+  dropTiles(bounds: Bounds[]) {
+    let dropped = false;
+    for (const b of bounds) dropped = this.#cache.delete(tileKey(b)) || dropped;
+    // Broadcast, so most workers own none of these — only the owner re-renders.
+    if (dropped) this.#invalidate();
+  }
+
+  /**
    * Update a layer's compositing params (order/alpha/displayMode) — no rebuild.
    * Note this deliberately does *not* drop `layer.tiles`: alpha and blend mode are
    * applied when the layer is composited onto the tile, so its own raster is
@@ -346,7 +374,7 @@ export class D2RendererV2Worker extends EventEmitter<
   #renderTile(bounds: Bounds, tile: Size): { hash: string; bitmap?: ImageBitmap } | undefined {
     const layers = this.#orderedLayers();
     const { top, right, bottom, left } = bounds;
-    const tileKey = hash([top, right, bottom, left, tile.width, tile.height]);
+    const key = tileKey(bounds);
 
     // Per layer: either a cached raster (step-invariant layers only — a map's
     // pixels in this tile don't depend on the playhead) or the visible bodies to
@@ -357,7 +385,7 @@ export class D2RendererV2Worker extends EventEmitter<
     // that array is viable — `push(...indices)` overflows the argument stack.
     // Keyed by size as well as position: the dynamic-resolution ticker flips the
     // tile size between a couple of discrete values, and both need to stay warm.
-    const layerKey = `${tileKey}:${tile.width}x${tile.height}`;
+    const layerKey = `${key}:${tile.width}x${tile.height}`;
 
     const perLayer = layers.map((l) => {
       const cached = l.invariant ? l.tiles.get(layerKey) : undefined;
@@ -395,7 +423,7 @@ export class D2RendererV2Worker extends EventEmitter<
     }
     const nextHash = c.toString(36);
 
-    const prev = this.#cache.get(tileKey);
+    const prev = this.#cache.get(key);
     if (prev && prev.hash === nextHash && prev.width + prev.height >= tile.width + tile.height) {
       return { hash: prev.hash };
     }
@@ -457,7 +485,7 @@ export class D2RendererV2Worker extends EventEmitter<
     ctx.globalCompositeOperation = "source-over";
 
     const bitmap = g.transferToImageBitmap();
-    this.#touch(tileKey, { hash: nextHash, width: bitmap.width, height: bitmap.height });
+    this.#touch(key, { hash: nextHash, width: bitmap.width, height: bitmap.height });
     return { hash: nextHash, bitmap };
   }
 
