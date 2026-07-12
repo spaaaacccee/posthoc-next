@@ -1,7 +1,12 @@
 import { CompiledComponent, Point, Size, Bounds } from "protocol";
 import { FeatureDescriptor } from "protocol/FeatureQuery";
 import EventEmitter from "typed-emitter";
-import { SharedComponentStore, SourceHandle, LayerParams } from "./SharedComponentStore";
+import {
+  LayerParams,
+  LayerShading,
+  SharedComponentStore,
+  SourceHandle,
+} from "./SharedComponentStore";
 
 export * from "./SharedComponentStore";
 
@@ -66,6 +71,11 @@ export interface Renderer<
   /** Set the global playhead. A body is visible iff `start <= step < end`. */
   setStep?(step: number): void;
   setLayerParams?(handle: SourceHandle, params: LayerParams): void;
+  /**
+   * Recolour a loaded layer in place, keeping its geometry and its spatial index.
+   * See {@link LayerShading}.
+   */
+  setLayerShading?(handle: SourceHandle, shading: LayerShading): void;
   getView(): HTMLElement | undefined;
   fitCamera(fn?: (body: Bounds & ComponentEntry<V, M>) => boolean): void;
   initialCamera(): void;

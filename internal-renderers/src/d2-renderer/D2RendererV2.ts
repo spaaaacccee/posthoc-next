@@ -3,7 +3,13 @@ import { ceil, floor, forEach, map, throttle, times } from "es-toolkit/compat";
 import { nanoid } from "nanoid";
 import * as PIXI from "pixi.js";
 import { Bounds } from "protocol";
-import { LayerParams, makeRenderer, SharedComponentStore, SourceHandle } from "renderer";
+import {
+  LayerParams,
+  LayerShading,
+  makeRenderer,
+  SharedComponentStore,
+  SourceHandle,
+} from "renderer";
 import type Flatbush from "flatbush";
 import { D2RendererBase } from "../d2-renderer-base/D2RendererBase";
 import { bodyBounds, cacheIndex, cachedIndex, openIndex, queryVisible } from "./columnarIndex";
@@ -251,6 +257,20 @@ export class D2RendererV2 extends D2RendererBase {
     this.#workers.forEach((w) => w.call("setLayerParams", [handle, params]));
   }
 
+  /**
+   * Recolour a layer, keeping its geometry and its Flatbush. See {@link LayerShading}.
+   *
+   * The columns are SharedArrayBuffer-backed, so this shares them with the workers
+   * rather than copying: only the small `palette`/`ramps` arrays are cloned. The
+   * main-thread copy is updated too, because hit-testing reads the same store.
+   */
+  setLayerShading(handle: SourceHandle, shading: LayerShading): void {
+    const layer = this.#layers.get(handle);
+    if (!layer) return;
+    layer.store = { ...layer.store, ...shading };
+    this.#workers.forEach((w) => w.call("setLayerShading", [handle, shading]));
+  }
+
   // Fit to the union of the selected layers' bounds. There is no per-body rbush
   // in v2, so bounds come from each layer's shared Flatbush; the ViewportPage
   // predicate only reads `meta.sourceLayer`, so a synthetic body per layer
@@ -298,6 +318,10 @@ export class D2RendererV2 extends D2RendererBase {
 
   #startDynamicResolution() {
     const { dynamicResolution } = this.options;
+    // Off: leave tiles pinned at `tileResolution`. Guarded here rather than by
+    // setting minScale === maxScale, which would still post a setTileResolution to
+    // every worker on every tick for the life of the renderer.
+    if (dynamicResolution.enabled === false) return;
     const { intervalMs, minScale } = dynamicResolution;
     const targetFrames = floor(PIXI.Ticker.targetFPMS * intervalMs);
     let frames = 0;

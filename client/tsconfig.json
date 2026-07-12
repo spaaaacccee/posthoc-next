@@ -21,6 +21,11 @@
     "composite": true,
     "noEmit": true
   },
-  "exclude": ["src/public", "src/public-dev", "node_modules"],
+  "exclude": [
+    "src/public",
+    "src/public-dev",
+    "node_modules",
+    "src/**/*.bench.test.ts"
+  ],
   "include": ["src", "src/components/app-bar/Title.test.tsx"]
 }

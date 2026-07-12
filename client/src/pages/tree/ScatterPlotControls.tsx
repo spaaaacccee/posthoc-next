@@ -1,7 +1,6 @@
 import { KeyboardArrowDownOutlined } from "@mui-symbols-material/w300";
 import { ModeStandbyOutlined, TimelineOutlined } from "@mui-symbols-material/w300";
 import { Checkbox, Collapse, IconButton, Stack, SxProps, Theme, Typography } from "@mui/material";
-import "@react-sigma/core/lib/style.css";
 import { FeaturePicker } from "components/app-bar/FeaturePicker";
 import { Heading, Option } from "components/layer-editor/Option";
 import { map, startCase, toPairs as entries } from "es-toolkit/compat";

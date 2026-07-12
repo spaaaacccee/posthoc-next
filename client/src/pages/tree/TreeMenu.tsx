@@ -13,7 +13,6 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import "@react-sigma/core/lib/style.css";
 import { useStep } from "components/app-bar/Playback";
 import { Label } from "components/generic/Label";
 import { showEventProperties } from "components/inspector/PropertyList";
@@ -23,7 +22,7 @@ import { usePlaybackControls } from "hooks/usePlaybackState";
 import { findLast, map, startCase } from "es-toolkit/compat";
 import { WithLayer } from "slices/layers";
 import { getShade } from "theme";
-import { isDefined } from "./TreeGraph";
+import { isDefined } from "utils/isDefined";
 import { TreeLayer } from "./TreeLayer";
 import { useSelection } from "./useSelection";
 

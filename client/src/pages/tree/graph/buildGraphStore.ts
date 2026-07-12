@@ -68,7 +68,6 @@ export type BuildGraphStoreOptions = {
   /** What a faded body tends towards; the viewport background. */
   background: string;
   edgeColor: string;
-  labelColor: string;
   /** Steps a body takes to fade out. Sigma's equivalent was 400. */
   fadeWindow?: number;
   generation?: number;
@@ -146,7 +145,6 @@ export function buildGraphStore({
   colors,
   background,
   edgeColor,
-  labelColor,
   fadeWindow = 400,
   generation = 0,
 }: BuildGraphStoreOptions): GraphStoreResult {
@@ -273,6 +271,11 @@ export function buildGraphStore({
   // last within each node's draw.
   const nEdge = edges.size;
   const count = nEdge + n;
+  // Held locally as well as on the store: they are optional on
+  // `SharedComponentStore` (a map layer has neither), but this function always
+  // writes them, and the narrow local types save an assertion on every access.
+  const arrow = sab(Uint8Array, 1, count);
+  const ramp = sab(Uint8Array, 1, count);
   const store: SharedComponentStore = {
     generation,
     count,
@@ -291,8 +294,8 @@ export function buildGraphStore({
     strings: [""],
     ptOff: sab(Int32Array, 4, count + 1),
     pts: sab(Float32Array, 4, nEdge * 4),
-    arrow: sab(Uint8Array, 1, count),
-    ramp: sab(Uint8Array, 1, count),
+    arrow,
+    ramp,
     ramps,
   };
 
@@ -318,12 +321,12 @@ export function buildGraphStore({
     // Line width in world units; the layer clamps it into a pixel range.
     store.size[b] = 1 + Math.log(e.visits);
     store.size2[b] = 8; // arrowhead size, in screen pixels
-    store.arrow[b] = arrowPacked;
+    arrow[b] = arrowPacked;
     store.alpha[b] = 1;
     store.start[b] = e.at;
     store.end[b] = total;
     store.fill[b] = edgeFill;
-    store.ramp[b] = e.ramp;
+    ramp[b] = e.ramp;
     b++;
   }
   // `b` may now trail `nEdge`: an edge whose endpoints never resolved was skipped,
@@ -362,7 +365,7 @@ export function buildGraphStore({
     store.alpha[b] = 1;
     store.start[b] = i;
     store.end[b] = until[i]!;
-    store.ramp[b] = rampOf.get(String(e.type ?? "")) ?? 0;
+    ramp[b] = rampOf.get(String(e.type ?? "")) ?? 0;
     store.fill[b] = 0;
     let s = stringOf.get(id);
     if (s === undefined) {

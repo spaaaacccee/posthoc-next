@@ -1,7 +1,13 @@
 import { filter, findLast, map } from "es-toolkit/compat";
 import { Trace } from "protocol";
 import { useMemo, useState } from "react";
-import { Selection } from "./GraphEvents";
+
+/** A node the user clicked, and the pointer event that selected it. */
+export type Selection = {
+  event: MouseEvent | TouchEvent;
+  /** The node's trace id. */
+  node: string;
+};
 
 export function useSelection(step: number, trace: Trace | undefined) {
   const [selection, setSelection] = useState<Selection>();

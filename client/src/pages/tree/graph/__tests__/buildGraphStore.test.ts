@@ -112,7 +112,7 @@ describe("buildGraphStore: edges", () => {
   it("runs each edge between its endpoints' laid-out positions", () => {
     const { store } = build();
     // First edge is b -> a: (10,100) -> (0,0).
-    expect([...store.pts.slice(0, 4)]).toEqual([10, 100, 0, 0]);
+    expect(Array.from(store.pts.slice(0, 4))).toEqual([10, 100, 0, 0]);
   });
 
   it("keeps only the final parent in tree mode, but every parent in a DAG", () => {

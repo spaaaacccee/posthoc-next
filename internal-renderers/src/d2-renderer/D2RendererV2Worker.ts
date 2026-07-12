@@ -1,7 +1,7 @@
 import { isEqual } from "es-toolkit";
 import { once, throttle } from "es-toolkit/compat";
 import type { Bounds, Point, Size } from "protocol";
-import type { LayerParams, SharedComponentStore } from "renderer";
+import type { LayerParams, LayerShading, SharedComponentStore } from "renderer";
 import { shadeOf } from "renderer";
 import type Flatbush from "flatbush";
 import type { DrawOptions } from "./columnarDraw";
@@ -215,6 +215,30 @@ export class D2RendererV2Worker extends EventEmitter<
       { action: "index", payload: { handle, generation: layer.generation, index } },
       [],
     );
+  }
+
+  /**
+   * Recolour a layer without touching its geometry — and, critically, without
+   * touching `fb`. The spatial index is derived from position and size alone, so a
+   * body that changes colour is still in the same box, and rebuilding the index
+   * would be pure waste.
+   *
+   * This is what a highlight or a colour-by-property is: on a 717k-body graph it
+   * swaps ~3MB of columns instead of repacking 40MB and rebuilding the R-tree.
+   *
+   * The raster cache does have to go: these are the pixels. `invariant` is
+   * recomputed too, since a recolour can add or remove ramps and so change whether
+   * the layer is step-invariant at all.
+   */
+  setLayerShading(handle: string, shading: LayerShading) {
+    const layer = this.#layers.get(handle);
+    if (!layer) return;
+    layer.store = { ...layer.store, ...shading };
+    layer.colors.clear();
+    layer.tiles.clear();
+    layer.invariant = isStepInvariant(layer.store);
+    this.#dirty();
+    this.#invalidate();
   }
 
   removeLayer(handle: string) {

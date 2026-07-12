@@ -183,6 +183,24 @@ export type SharedComponentStore = {
 export type SourceHandle = string;
 
 /**
+ * A layer's colour, swappable without touching its geometry.
+ *
+ * The columns here are exactly the ones that say what a body *looks like*; every
+ * column that says where it *is* — `x`, `y`, `size`, `pts` — is absent. That split
+ * is the point: the spatial index is derived from geometry alone, so a recolour
+ * can reuse it verbatim rather than repacking it.
+ *
+ * It is what "highlight the path back to the root" and "colour nodes by their `g`
+ * value" both really are. Doing either by rebuilding the store would cost a full
+ * repack plus an O(n log n) index rebuild — ~450ms on a 717k-body graph — to
+ * change two columns worth ~3MB. This is those two columns.
+ */
+export type LayerShading = Pick<
+  SharedComponentStore,
+  "fill" | "ramp" | "palette" | "ramps" | "generation"
+>;
+
+/**
  * How a kind's `size` column becomes a pixel size.
  *
  * A map is world-space: a wall is one world unit wide and should grow when you

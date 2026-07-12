@@ -2,8 +2,10 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import { withSharedEvents } from "components/renderer/parser-v140/traceEventStore";
 import { endpointSymbol } from "vite-plugin-comlink/symbol";
 import { withWorker } from "workers/workerLanes";
+import type { Trace } from "protocol/Trace-v140";
+import type { LayerShading } from "renderer";
 import type { GraphStoreResult } from "./buildGraphStore";
-import type { GraphStoreWorkerParameters } from "./graphStore.worker";
+import type { GraphStoreWorkerParameters, ShadeWorkerParameters } from "./graphStore.worker";
 
 type WorkerModule = typeof import("./graphStore.worker");
 
@@ -41,7 +43,6 @@ export const graphStoreQuery = ({ key, trace, ...options }: GraphStoreOptions) =
       options.fadeWindow,
       options.background,
       options.edgeColor,
-      options.labelColor,
       options.colors,
       options.layout?.length,
     ],
@@ -57,4 +58,48 @@ export const graphStoreQuery = ({ key, trace, ...options }: GraphStoreOptions) =
 
 export function useGraphStore(options: GraphStoreOptions) {
   return useQuery(graphStoreQuery(options));
+}
+
+export type GraphShadingOptions = Omit<ShadeWorkerParameters, "eventStore" | "events"> & {
+  key?: string;
+  trace?: Trace;
+};
+
+/**
+ * A graph's colour, recomputed when the highlight or the tracked property changes
+ * — and *only* then. Geometry and the spatial index are untouched, so this never
+ * repacks a column or rebuilds the R-tree: see `Renderer.setLayerShading`.
+ */
+export const graphShadingQuery = ({ key, trace, ...options }: GraphShadingOptions) =>
+  queryOptions({
+    queryKey: [
+      "compute/tree/graph-shading",
+      key,
+      options.generation,
+      options.edgeCount,
+      options.trackedProperty,
+      options.highlight,
+      options.highlightColor,
+      options.background,
+      options.edgeColor,
+      options.colors,
+      options.fadeWindow,
+      options.geometry.count,
+    ],
+    queryFn: async ({ signal }): Promise<LayerShading> => {
+      const shared = await withSharedEvents(key, trace, { signal });
+      return withWorker(
+        "tree",
+        spawnWorker,
+        terminate,
+        (w) => w.shade({ ...options, eventStore: shared.store }),
+        { signal },
+      );
+    },
+    enabled: !!key && options.geometry.count > 0,
+    staleTime: Infinity,
+  });
+
+export function useGraphShading(options: GraphShadingOptions) {
+  return useQuery(graphShadingQuery(options));
 }

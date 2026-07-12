@@ -23,6 +23,19 @@ export type Point = {
  * whole `[minScale, maxScale]` range.
  */
 type DynamicResolutionOptions = {
+  /**
+   * Turn the feedback loop off entirely, pinning tiles at `tileResolution`.
+   *
+   * Worth doing for any layer whose tiles are cached against a *content* hash
+   * rather than re-rasterized every frame — a graph, whose colour ramps make its
+   * tiles stable between bucket crossings. Tile size is part of every cache key
+   * here, and `setTileResolution` clears the tile cache outright, so a ticker that
+   * flips the size every 500ms under load would evict exactly the cache the ramps
+   * exist to keep warm, twice a second, for the whole of a scrub. The map view,
+   * which re-rasterizes its trace layer every step anyway, has much less to lose
+   * and keeps it.
+   */
+  enabled?: boolean;
   intervalMs: number;
   increment: number;
   maxScale: number;
