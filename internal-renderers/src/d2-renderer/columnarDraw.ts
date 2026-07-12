@@ -30,6 +30,25 @@ const CANVAS_BASELINES = ["alphabetic", "top", "middle", "bottom"] as const;
 
 const GREY = "#808080";
 
+/**
+ * Circles at or below this pixel radius are splatted as a filled rect rather than
+ * stroked as an ellipse.
+ *
+ * `beginPath` + `ellipse` + `fill` is roughly an order of magnitude dearer than one
+ * `fillRect`, and it buys nothing here: at a radius of 2px a circle and a square
+ * are the same handful of pixels, and at these sizes the eye is reading a density
+ * cloud, not individual nodes. This is the single measure that decouples frame cost
+ * from node count — a 717k-point scatter fitted to the viewport draws every node at
+ * ~2px, so *all* of it takes this path.
+ *
+ * 2 rather than 1 is deliberate and was measured: at 1, a fitted scatter sits just
+ * above the threshold and strokes 717k ellipses.
+ */
+export const SPLAT_RADIUS_PX = 2;
+
+/** Normalise -0, which is a distinct value under Object.is and leaks into tests. */
+const nz = (v: number) => (v === 0 ? 0 : v);
+
 /** Maps world coords into tile pixels: `px = world * s + t`. */
 export type DrawTransform = { x: number; y: number; sx: number; sy: number };
 
@@ -328,12 +347,9 @@ export function drawBody(
     const s = sizing?.circle;
     const rx = pxSize(store.size[i]!, t.sx, s);
     const ry = pxSize(store.size[i]!, t.sy, s);
-    if (rx <= 1 && ry <= 1) {
-      // Sub-pixel: splat. At a million nodes zoomed out every node lands here,
-      // and one fillRect beats beginPath + ellipse + fill by roughly an order of
-      // magnitude. This is what bounds fill rate by *screen area* rather than by
-      // node count.
-      ctx.fillRect(round(x), round(y), 1, 1);
+    if (rx <= SPLAT_RADIUS_PX && ry <= SPLAT_RADIUS_PX) {
+      // Small enough that a square reads as a dot: splat. See SPLAT_RADIUS_PX.
+      ctx.fillRect(nz(round(x - rx)), nz(round(y - ry)), ceil(rx * 2) || 1, ceil(ry * 2) || 1);
     } else {
       ctx.beginPath();
       ctx.ellipse(ceil(x), ceil(y), ceil(rx), ceil(ry), 0, 0, 2 * PI);

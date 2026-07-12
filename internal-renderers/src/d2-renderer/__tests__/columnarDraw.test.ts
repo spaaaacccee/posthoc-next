@@ -274,8 +274,6 @@ describe("pxSize", () => {
 
 describe("drawBody: level of detail", () => {
   it("splats a sub-pixel circle with fillRect instead of an ellipse", () => {
-    // The load-bearing case: a million nodes zoomed out all land here, and this
-    // is what bounds fill rate by screen area rather than by node count.
     const store = circleStore(0.4);
     const ctx = ctx2d();
     drawBody(store, 0, ctx as never, unit, new Map(), { step: 0 });
@@ -283,7 +281,18 @@ describe("drawBody: level of detail", () => {
     expect(ctx.ellipse).not.toHaveBeenCalled();
   });
 
-  it("draws an ellipse once the clamp lifts it above a pixel", () => {
+  it("splats a small-but-visible circle too, as a rect of its diameter", () => {
+    // The load-bearing case, and it is *not* the sub-pixel one. A 717k-point
+    // scatter fitted to the viewport draws every node at ~2px — above a pixel, so
+    // a sub-pixel-only splat would miss all of it and stroke 717k ellipses.
+    const store = circleStore(2);
+    const ctx = ctx2d();
+    drawBody(store, 0, ctx as never, unit, new Map(), { step: 0 });
+    expect(ctx.fillRect).toHaveBeenCalledWith(-2, -2, 4, 4);
+    expect(ctx.ellipse).not.toHaveBeenCalled();
+  });
+
+  it("draws a real ellipse once a circle is big enough to read as round", () => {
     const store = circleStore(0.4);
     const ctx = ctx2d();
     drawBody(store, 0, ctx as never, unit, new Map(), {
