@@ -63,4 +63,40 @@ describe("columnarIndex", () => {
   it("returns undefined for an empty store (Flatbush requires >=1 item)", () => {
     expect(buildIndex({ ...store, count: 0 })).toBeUndefined();
   });
+
+  // The index stores boxes as float32 to halve its memory, but `bodyBounds`
+  // computes in float64 — and narrowing to the *nearest* float32 can nudge a min
+  // up or a max down, shrinking the box until a body that grazes a tile edge is
+  // no longer returned. Leaf boxes are therefore rounded strictly outward; this
+  // is the test that would catch it if they weren't.
+  it("never loses a body to float32 rounding: each is found by its own exact box", () => {
+    const n = 64;
+    const kind = new Uint8Array(new SharedArrayBuffer(n));
+    // Coordinates chosen to be awkward in float32: thirds, tenths, big magnitudes.
+    const xs = Array.from({ length: n }, (_, i) => (i % 2 ? i / 3 : i * 1234.5678) + 0.1);
+    const ys = Array.from({ length: n }, (_, i) => (i % 3 ? i / 7 : i * 9876.5432) + 0.2);
+    const sizes = Array.from({ length: n }, (_, i) => (i % 5) / 3 + 0.3);
+    const awkward: SharedComponentStore = {
+      ...store,
+      count: n,
+      kind, // all rects
+      x: f32(xs),
+      y: f32(ys),
+      size: f32(sizes),
+      size2: f32(sizes),
+      alpha: f32(Array.from({ length: n }, () => 1)),
+      start: i32(Array.from({ length: n }, () => 0)),
+      end: i32(Array.from({ length: n }, () => 10)),
+      fill: i32(Array.from({ length: n }, () => 1)),
+      label: i32(Array.from({ length: n }, () => 0)),
+      ptOff: i32(Array.from({ length: n + 1 }, () => 0)),
+    };
+    const fb = openIndex(buildIndex(awkward)!);
+    for (let i = 0; i < n; i++) {
+      const [minX, minY, maxX, maxY] = bodyBounds(awkward, i);
+      expect(fb.search(minX, minY, maxX, maxY)).toContain(i);
+      // ...and by a degenerate query exactly on its far corner.
+      expect(fb.search(maxX, maxY, maxX, maxY)).toContain(i);
+    }
+  });
 });

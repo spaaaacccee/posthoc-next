@@ -77,37 +77,91 @@ export type IndexedGeneration = {
   generation: number;
 };
 
-// A store is immutable, so its index is too. Re-`load()`ing the same (cached)
-// store — e.g. every time the viewport remounts — should not rebuild it.
-const indexCache = new WeakMap<SharedComponentStore, SharedArrayBuffer | undefined>();
+// The index stores boxes as float32 (half the memory and twice the cache density
+// of float64, over a store whose coordinates are float32 anyway). But `bodyBounds`
+// computes in float64, and narrowing rounds to the *nearest* float32 — which can
+// nudge a `min` up or a `max` down and quietly shrink the box, dropping a body
+// that grazes a tile edge. So leaf boxes are rounded strictly outward.
+const f32 = new Float32Array(1);
+const u32 = new Uint32Array(f32.buffer);
 
-/**
- * Build the shared Flatbush index for a store. Bodies are added in column order
- * so a query returns store indices directly. Returns `undefined` for an empty
- * store (Flatbush requires ≥1 item). The `.data` buffer is a SharedArrayBuffer
- * ready to hand to workers. Memoized per store.
- */
-export function buildIndex(store: SharedComponentStore): SharedArrayBuffer | undefined {
-  if (indexCache.has(store)) return indexCache.get(store);
-  const built = buildIndexUncached(store);
-  indexCache.set(store, built);
-  return built;
+/** The float32 nearest `v` and `<= v`. */
+function floorF32(v: number): number {
+  f32[0] = v;
+  const r = f32[0]!;
+  if (r <= v || !Number.isFinite(r)) return r;
+  // Rounded up: step one ulp toward -Infinity.
+  u32[0] = u32[0]! + (r > 0 ? -1 : 1);
+  return f32[0]!;
 }
 
-function buildIndexUncached(store: SharedComponentStore): SharedArrayBuffer | undefined {
+/** The float32 nearest `v` and `>= v`. */
+function ceilF32(v: number): number {
+  f32[0] = v;
+  const r = f32[0]!;
+  if (r >= v || !Number.isFinite(r)) return r;
+  // Rounded down: step one ulp toward +Infinity.
+  u32[0] = u32[0]! + (r >= 0 ? 1 : -1);
+  return f32[0]!;
+}
+
+/**
+ * Pack the Flatbush index for a store. Bodies are added in column order so a
+ * query returns store indices directly. Returns `undefined` for an empty store
+ * (Flatbush requires ≥1 item). The `.data` buffer is a SharedArrayBuffer ready
+ * to hand to workers.
+ *
+ * This is O(n log n) with a `bodyBounds` per body — it is the expensive half of
+ * loading a layer, and is deliberately *not* memoized, because it is meant to
+ * run in a worker (see `D2RendererV2Worker.buildLayerIndex`). The main thread
+ * memoizes the *result* via {@link cachedIndex}/{@link cacheIndex}.
+ */
+export function packIndex(store: SharedComponentStore): SharedArrayBuffer | undefined {
   if (store.count === 0) return undefined;
   const fb = new Flatbush(
     store.count,
     16,
-    Float64Array,
+    Float32Array,
     SharedArrayBuffer as unknown as ArrayBufferConstructor,
   );
   for (let i = 0; i < store.count; i++) {
     const [minX, minY, maxX, maxY] = bodyBounds(store, i);
-    fb.add(minX, minY, maxX, maxY);
+    fb.add(floorF32(minX), floorF32(minY), ceilF32(maxX), ceilF32(maxY));
   }
   fb.finish();
   return fb.data as SharedArrayBuffer;
+}
+
+// A store is immutable, so its index is too. Re-`load()`ing the same (cached)
+// store — e.g. every time the viewport remounts — should not rebuild it. This
+// lives on the main thread, keyed by store identity: a store that crosses a
+// `postMessage` arrives as a fresh wrapper object (the columns are shared, the
+// wrapper is cloned), so a worker-side cache would never hit.
+const indexCache = new WeakMap<SharedComponentStore, SharedArrayBuffer | undefined>();
+
+/**
+ * The memoized index for `store`, if it has been built before. `hit` is what
+ * distinguishes "not built yet" from "built, and it's `undefined` because the
+ * store is empty" — both of which have an `undefined` index.
+ */
+export function cachedIndex(store: SharedComponentStore): {
+  hit: boolean;
+  index?: SharedArrayBuffer;
+} {
+  return indexCache.has(store) ? { hit: true, index: indexCache.get(store) } : { hit: false };
+}
+
+export function cacheIndex(store: SharedComponentStore, index?: SharedArrayBuffer) {
+  indexCache.set(store, index);
+}
+
+/** Pack-and-memoize, in one synchronous step. Prefer the async worker path. */
+export function buildIndex(store: SharedComponentStore): SharedArrayBuffer | undefined {
+  const cached = cachedIndex(store);
+  if (cached.hit) return cached.index;
+  const built = packIndex(store);
+  cacheIndex(store, built);
+  return built;
 }
 
 export function buildIndexedGeneration(store: SharedComponentStore): IndexedGeneration {
@@ -119,25 +173,78 @@ export function openIndex(index: SharedArrayBuffer): Flatbush {
   return Flatbush.from(index);
 }
 
+/**
+ * True when every body is visible at every step, so this layer's contribution to
+ * any tile is *step-invariant* — the same pixels at step 0 and step 10,000.
+ *
+ * Map layers are exactly this (`buildStaticComponentStore` gives every body the
+ * span `[0, STATIC_END)`), and they are the reason it's worth asking: without it,
+ * a map's walls are re-rasterized into every tile on every step, purely because
+ * the trace layer sharing that tile changed. O(count), once per layer.
+ */
+export function isStepInvariant(store: SharedComponentStore): boolean {
+  for (let i = 0; i < store.count; i++) {
+    if (store.start[i]! > 0 || store.end[i]! < store.total) return false;
+  }
+  return true;
+}
+
 export type QueryBounds = { top: number; left: number; right: number; bottom: number };
+
+/**
+ * A growable scratch buffer for {@link queryVisible} results.
+ *
+ * A query returns a *view* onto this buffer, so it is invalidated by the next
+ * query against the same scratch. Anything holding several results live at once
+ * (the tile renderer, which queries every layer before drawing any) needs one
+ * scratch **per layer** — sharing one would silently make each layer draw the
+ * next layer's bodies.
+ */
+export class QueryScratch {
+  #buf = new Uint32Array(1024);
+  take(n: number): Uint32Array {
+    if (this.#buf.length < n) this.#buf = new Uint32Array(2 ** Math.ceil(Math.log2(n)));
+    return this.#buf;
+  }
+}
+
+export type QueryOptions = {
+  /** Reusable output buffer. Omit to allocate a fresh one per call. */
+  scratch?: QueryScratch;
+  /** Sort ascending, so draw order matches body index. Skip it for hit-testing. */
+  sort?: boolean;
+};
 
 /**
  * Store indices of bodies overlapping `bounds` AND visible at `step`
  * (`start <= step < end`), sorted ascending so draw order matches the stable
  * body index. This is the render-time intersection of the spatial query and the
  * decoupled visibility span — O(candidates in tile), no global scan.
+ *
+ * The step predicate is pushed into Flatbush's traversal filter, so bodies
+ * outside the current span are rejected before they land in a result array. The
+ * result is a `Uint32Array` sorted with the numeric typed-array sort: a tile can
+ * hold hundreds of thousands of bodies, and a `number[]` with a comparator pays
+ * a JS call per comparison.
  */
 export function queryVisible(
   store: SharedComponentStore,
   fb: Flatbush,
   bounds: QueryBounds,
   step: number,
-): number[] {
-  const hits = fb.search(bounds.left, bounds.top, bounds.right, bounds.bottom);
-  const out: number[] = [];
-  for (const i of hits) {
-    if (store.start[i]! <= step && step < store.end[i]!) out.push(i);
-  }
-  out.sort((a, b) => a - b);
+  { scratch, sort = true }: QueryOptions = {},
+): Uint32Array {
+  const hits = fb.search(
+    bounds.left,
+    bounds.top,
+    bounds.right,
+    bounds.bottom,
+    (i) => store.start[i]! <= step && step < store.end[i]!,
+  );
+  const n = hits.length;
+  const buf = scratch ? scratch.take(n) : new Uint32Array(n);
+  for (let k = 0; k < n; k++) buf[k] = hits[k]!;
+  const out = buf.subarray(0, n);
+  if (sort) out.sort();
   return out;
 }

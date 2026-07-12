@@ -7,20 +7,19 @@ import "vitest-canvas-mock";
 // assumed jest globals, and mocked WebGL that nothing under test uses.)
 if (typeof globalThis.OffscreenCanvas === "undefined") {
   class OffscreenCanvasShim {
-    #canvas: HTMLCanvasElement;
-    constructor(
-      public width: number,
-      public height: number,
-    ) {
-      this.#canvas = document.createElement("canvas");
-      this.#canvas.width = width;
-      this.#canvas.height = height;
-    }
-    getContext(contextId: string, options?: unknown) {
-      return this.#canvas.getContext(contextId as "2d", options as object);
-    }
-    transferToImageBitmap() {
-      return { width: this.width, height: this.height, close() {} };
+    constructor(width: number, height: number) {
+      // Returning an object from a constructor overrides `this`, so
+      // `new OffscreenCanvas(w, h)` yields an actual <canvas>. That matters:
+      // the renderer composites cached layer rasters with `ctx.drawImage(canvas)`,
+      // and the canvas mock type-checks its argument — a wrapper object that
+      // merely *holds* a canvas is rejected.
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      Object.assign(canvas, {
+        transferToImageBitmap: () => ({ width, height, close() {} }),
+      });
+      return canvas as unknown as OffscreenCanvasShim;
     }
   }
   Object.assign(globalThis, { OffscreenCanvas: OffscreenCanvasShim });

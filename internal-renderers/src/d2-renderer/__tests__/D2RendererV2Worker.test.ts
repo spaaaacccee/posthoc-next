@@ -1,0 +1,353 @@
+import { defaultD2RendererOptions } from "d2-renderer/D2RendererOptions";
+import { D2RendererV2Worker, D2V2WorkerEvent } from "d2-renderer/D2RendererV2Worker";
+import type { SharedComponentStore } from "renderer";
+import { describe, expect, it } from "vitest";
+
+const f32 = (a: number[]) => {
+  const t = new Float32Array(new SharedArrayBuffer(a.length * 4));
+  t.set(a);
+  return t;
+};
+const i32 = (a: number[]) => {
+  const t = new Int32Array(new SharedArrayBuffer(a.length * 4));
+  t.set(a);
+  return t;
+};
+
+/**
+ * Two rects, far apart so they land in different tiles. Both span the whole trace
+ * (`[0, total)`), so this store is *step-invariant* — as a map layer's is.
+ */
+function makeStore(): SharedComponentStore {
+  const kind = new Uint8Array(new SharedArrayBuffer(2));
+  kind.set([0, 0]);
+  return {
+    generation: 1,
+    count: 2,
+    total: 10,
+    kind,
+    x: f32([0, 300]),
+    y: f32([0, 300]),
+    size: f32([10, 10]),
+    size2: f32([10, 10]),
+    alpha: f32([1, 1]),
+    start: i32([0, 0]),
+    end: i32([10, 10]),
+    fill: i32([1, 1]),
+    palette: ["", "red"],
+    label: i32([0, 0]),
+    strings: [""],
+    ptOff: i32([0, 0, 0]),
+    pts: f32([]),
+  };
+}
+
+/**
+ * A step-invariant store dense enough to clear MIN_BODIES_TO_CACHE: a sparse
+ * layer isn't worth caching (a full-tile blit costs more than drawing a few
+ * rects), so only a dense one exercises the raster cache. All bodies sit in one
+ * small region, so they land in the same tile.
+ */
+function makeDenseStore(n = 400): SharedComponentStore {
+  const kind = new Uint8Array(new SharedArrayBuffer(n)); // all rects
+  const fill = (v: number) => Array.from({ length: n }, () => v);
+  return {
+    ...makeStore(),
+    count: n,
+    kind,
+    x: f32(Array.from({ length: n }, (_, i) => (i % 20) * 2)),
+    y: f32(Array.from({ length: n }, (_, i) => Math.floor(i / 20) * 2)),
+    size: f32(fill(1)),
+    size2: f32(fill(1)),
+    alpha: f32(fill(1)),
+    start: i32(fill(0)),
+    end: i32(fill(10)),
+    fill: i32(fill(1)),
+    label: i32(fill(0)),
+    ptOff: i32(Array.from({ length: n + 1 }, () => 0)),
+  };
+}
+
+/** Same, but body 0 disappears at step 2 — so the layer is *not* step-invariant. */
+function makeDynamicStore(): SharedComponentStore {
+  const store = makeStore();
+  store.end.set([2, 10]);
+  return store;
+}
+
+/** Count `new OffscreenCanvas(...)` during `fn`. */
+function countCanvases(fn: () => void): number {
+  const Real = globalThis.OffscreenCanvas;
+  let n = 0;
+  class Counting extends Real {
+    constructor(width: number, height: number) {
+      super(width, height);
+      n++;
+    }
+  }
+  globalThis.OffscreenCanvas = Counting as unknown as typeof Real;
+  try {
+    fn();
+  } finally {
+    globalThis.OffscreenCanvas = Real;
+  }
+  return n;
+}
+
+function makeWorker(options: { workerCount?: number; workerIndex?: number } = {}) {
+  const worker = new D2RendererV2Worker();
+  worker.setup({ ...defaultD2RendererOptions, workerCount: 1, workerIndex: 0, ...options });
+  worker.setFrustum({ top: 0, left: 0, bottom: 512, right: 512 });
+  return worker;
+}
+
+/** Collect the `update` payloads a render emits. */
+function capture(worker: D2RendererV2Worker) {
+  const events: D2V2WorkerEvent[] = [];
+  worker.on("message", (e) => events.push(e));
+  return events;
+}
+
+const key = (b: { top: number; left: number }) => `${b.left},${b.top}`;
+const updates = (events: D2V2WorkerEvent[]) => events.filter((e) => e.action === "update");
+
+describe("D2RendererV2Worker", () => {
+  describe("buildLayerIndex", () => {
+    it("packs the index and hands it back, then the layer draws", () => {
+      const worker = makeWorker();
+      const events = capture(worker);
+      const store = makeStore();
+
+      // The main thread loads with no index — that work is ours now.
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.render();
+      expect(updates(events).some((e) => e.payload.bitmap)).toBe(true); // background only
+
+      events.length = 0;
+      worker.buildLayerIndex("a");
+
+      const index = events.find((e) => e.action === "index");
+      expect(index).toBeDefined();
+      expect(index!.payload).toMatchObject({ handle: "a", generation: 1 });
+      expect((index!.payload as { index?: SharedArrayBuffer }).index).toBeInstanceOf(
+        SharedArrayBuffer,
+      );
+    });
+
+    it("reports an empty store as an absent index rather than throwing", () => {
+      const worker = makeWorker();
+      const events = capture(worker);
+      const store = { ...makeStore(), count: 0 };
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      const index = events.find((e) => e.action === "index");
+      expect(index).toBeDefined();
+      expect((index!.payload as { index?: SharedArrayBuffer }).index).toBeUndefined();
+    });
+
+    it("is a no-op for a layer that was unloaded while it was packing", () => {
+      const worker = makeWorker();
+      capture(worker);
+      expect(() => worker.buildLayerIndex("gone")).not.toThrow();
+    });
+  });
+
+  describe("setStep", () => {
+    // Ownership used to rotate on every step (`#now++`), so a scrub handed each
+    // tile to a different worker and the content-hash cache below was always
+    // consulted by a worker that had never rendered that tile.
+    it("keeps tile ownership fixed across a step change", () => {
+      const worker = makeWorker({ workerCount: 4, workerIndex: 1 });
+      const store = makeStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+
+      const before = capture(worker);
+      worker.render();
+      const ownedAtStep0 = updates(before).map((e) => key(e.payload.bounds));
+      expect(ownedAtStep0.length).toBeGreaterThan(0);
+
+      const after = capture(worker);
+      worker.setStep(1);
+      worker.render();
+      const ownedAtStep1 = updates(after).map((e) => key(e.payload.bounds));
+
+      expect([...ownedAtStep1].sort()).toEqual([...ownedAtStep0].sort());
+    });
+
+    it("does not re-rasterize a tile whose content is unchanged at the new step", () => {
+      const worker = makeWorker();
+      const store = makeStore(); // every body spans [0, 10) — steps 0..9 look identical
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.render();
+
+      const events = capture(worker);
+      worker.setStep(1);
+      worker.render();
+
+      const out = updates(events);
+      expect(out.length).toBeGreaterThan(0);
+      // Every tile resolves, but none ships a new bitmap: same content, cache hit.
+      expect(out.every((e) => !e.payload.bitmap)).toBe(true);
+    });
+
+    it("does re-rasterize when the step actually changes what is visible", () => {
+      const worker = makeWorker();
+      const store = makeStore();
+      store.end.set([2, 10]); // body 0 disappears at step 2
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.render();
+
+      const events = capture(worker);
+      worker.setStep(5);
+      worker.render();
+
+      expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+    });
+  });
+
+  describe("setLayerParams", () => {
+    it("drops the tile cache and the memoized draw order", () => {
+      const worker = makeWorker();
+      const store = makeStore();
+      worker.setLayer("a", { store, generation: store.generation }, { index: 0 });
+      worker.buildLayerIndex("a");
+      capture(worker);
+      worker.render();
+      expect(worker.cacheSize).toBeGreaterThan(0);
+
+      worker.setLayerParams("a", { index: 2 });
+      expect(worker.cacheSize).toBe(0);
+
+      // ...and the next render repaints rather than serving stale tiles.
+      const events = capture(worker);
+      worker.render();
+      expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+    });
+  });
+
+  it("reuses two pooled surfaces rather than allocating a canvas per tile", () => {
+    const worker = makeWorker();
+    const store = makeDynamicStore(); // dynamic: no per-layer raster cache to allocate
+    worker.setLayer("a", { store, generation: store.generation });
+    worker.buildLayerIndex("a");
+    capture(worker);
+
+    const allocations = countCanvases(() => {
+      worker.render(); // many tiles
+      worker.setStep(3);
+      worker.render();
+      worker.setStep(7);
+      worker.render();
+    });
+    // Output + layer scratch, for the life of the worker — not two per tile per
+    // render, which is what this used to be.
+    expect(allocations).toBeLessThanOrEqual(2);
+  });
+
+  // A map layer's bodies span the whole trace, so its pixels in a given tile are
+  // identical at step 0 and step 10,000. Without this cache, its walls were
+  // re-rasterized into every tile on every step, purely because the trace layer
+  // sharing that tile had changed.
+  describe("step-invariant layer raster cache", () => {
+    it("rasterizes an invariant layer once per tile, then reuses it across steps", () => {
+      const worker = makeWorker();
+      const store = makeDenseStore(); // invariant AND dense enough to be worth caching
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      capture(worker);
+
+      const first = countCanvases(() => worker.render());
+      expect(worker.layerTileCacheSize).toBeGreaterThan(0);
+      expect(first).toBeGreaterThan(2); // 2 pooled + one per tile holding content
+
+      // Every later step composites from those cached rasters — no new canvas,
+      // no re-query, no re-rasterize.
+      const later = countCanvases(() => {
+        worker.setStep(3);
+        worker.render();
+        worker.setStep(8);
+        worker.render();
+      });
+      expect(later).toBe(0);
+    });
+
+    it("does not cache a layer whose bodies come and go", () => {
+      const worker = makeWorker();
+      const store = makeDynamicStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      capture(worker);
+      worker.render();
+      expect(worker.layerTileCacheSize).toBe(0);
+    });
+
+    // A blit of a whole tile costs more than drawing a couple of rects, so a
+    // sparse invariant layer is deliberately left uncached — caching it would
+    // trade cheap draws for an expensive drawImage plus a megabyte of canvas.
+    it("does not allocate a raster for a sparse invariant layer", () => {
+      const worker = makeWorker();
+      const store = makeStore(); // invariant, but only 2 bodies
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      capture(worker);
+
+      const allocations = countCanvases(() => worker.render());
+      expect(allocations).toBeLessThanOrEqual(2); // the pooled surfaces only
+    });
+
+    it("survives a compositing-param change — alpha applies at composite time", () => {
+      const worker = makeWorker();
+      const store = makeDenseStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      capture(worker);
+      worker.render();
+      const cached = worker.layerTileCacheSize;
+      expect(cached).toBeGreaterThan(0);
+
+      worker.setLayerParams("a", { alpha: 0.5 });
+      expect(worker.layerTileCacheSize).toBe(cached); // the raster is unchanged...
+      expect(worker.cacheSize).toBe(0); // ...but the composited tiles are stale
+
+      const allocations = countCanvases(() => worker.render());
+      expect(allocations).toBe(0); // re-composited straight from cache
+    });
+
+    // The dynamic-resolution ticker flips the tile size every 500ms under load
+    // (scale oscillates between minScale and maxScale). Dropping the rasters on
+    // each flip re-rasterized every invariant layer into a fresh canvas twice a
+    // second — worse than no cache at all, and it pegged the CPU in the real app.
+    // Size is part of the key instead, so the sizes it cycles between stay warm.
+    it("keeps rasters warm across the tile sizes dynamic resolution cycles through", () => {
+      const worker = makeWorker();
+      const store = makeDenseStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      capture(worker);
+
+      const A = { width: 64, height: 64 };
+      const B = { width: 96, height: 96 };
+      worker.setTileResolution(A);
+      worker.render();
+      worker.setTileResolution(B);
+      worker.render();
+      const warm = worker.layerTileCacheSize;
+      expect(warm).toBeGreaterThan(0);
+
+      // Flip back and forth: both sizes are already cached, so no re-rasterizing.
+      const allocations = countCanvases(() => {
+        worker.setTileResolution(A);
+        worker.render();
+        worker.setTileResolution(B);
+        worker.render();
+      });
+      // The only allocations are the two pooled surfaces being resized on each
+      // flip (2 surfaces x 2 flips). Crucially, not one tile raster is rebuilt.
+      expect(allocations).toBeLessThanOrEqual(4);
+      expect(worker.layerTileCacheSize).toBe(warm);
+    });
+  });
+});

@@ -11,6 +11,17 @@ export type Point = {
   y: number;
 };
 
+/**
+ * Under load, tiles are rasterized smaller and upscaled. `scale` divides the tile
+ * resolution, so the *set of distinct tile sizes* is `tileResolution / scale` over
+ * every scale this can reach.
+ *
+ * Keep that set tiny. Every distinct size is a separate entry in the workers'
+ * per-layer raster cache (which is keyed by size), and a size the renderer visits
+ * only occasionally is a cache slot that never pays for itself. The defaults below
+ * make it strictly binary — full or half — by using an `increment` equal to the
+ * whole `[minScale, maxScale]` range.
+ */
 type DynamicResolutionOptions = {
   intervalMs: number;
   increment: number;
@@ -19,6 +30,22 @@ type DynamicResolutionOptions = {
   dtMax: number;
   dtMin: number;
 };
+
+/**
+ * One step of the dynamic-resolution feedback loop: given the current scale and
+ * the average frame delta over the last interval, pick the next scale. Slow frames
+ * (`adt >= dtMax`) scale up (smaller tiles); fast frames (`adt <= dtMin`) scale
+ * back down; in between, hold — the gap between the two thresholds is the
+ * hysteresis that stops it oscillating on every tick.
+ */
+export function nextResolutionScale(
+  scale: number,
+  adt: number,
+  { dtMax, dtMin, increment, maxScale, minScale }: DynamicResolutionOptions,
+): number {
+  const next = adt >= dtMax ? scale + increment : adt <= dtMin ? scale - increment : scale;
+  return Math.min(maxScale, Math.max(minScale, next));
+}
 
 export type D2RendererOptions = RendererOptions & {
   tileResolution: Size;
@@ -46,10 +73,15 @@ export const defaultD2RendererOptions: D2RendererOptions = {
   errorColor: "#f44336",
   backgroundColor: "#ffffff",
   accentColor: "#333333",
+  // Binary: full resolution or half, nothing in between. `increment` spans the
+  // whole range, so `scale` is only ever exactly `minScale` or `maxScale` and the
+  // renderer only ever produces two tile sizes. The previous 0.5 increment over
+  // [1, 1.5] gave a third, awkward size (tile / 1.5) and let the loop drift
+  // between them, which churns every size-keyed cache downstream for no gain.
   dynamicResolution: {
     intervalMs: 500,
-    increment: 0.5,
-    maxScale: 1.5,
+    increment: 1,
+    maxScale: 2,
     minScale: 1,
     dtMax: 1.5,
     dtMin: 1.1,

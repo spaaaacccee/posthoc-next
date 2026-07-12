@@ -51,7 +51,12 @@ export class D2RendererBase
       width: options.screenSize.width,
       height: options.screenSize.height,
       autoDensity: true,
-      resolution: 2,
+      // Match the display, don't assume retina. This was hardcoded to 2, so on a
+      // dpr-1 display the stage rendered 4x the fragments it needed — and the
+      // tiles being upscaled onto it are sized from `devicePixelRatio` anyway
+      // (see TraceRenderer's `tileSize`), so the extra fill bought blur, not
+      // detail.
+      resolution: globalThis.devicePixelRatio || 1,
     });
     this.setupViewport(options);
     this.setupOverlay();
@@ -175,8 +180,14 @@ export class D2RendererBase
       });
     }
   }
+  // `maxWait` is what makes this fire *during* a pan. `moved` lands every frame
+  // while dragging and again on every inertia tick, so a plain debounce (whose
+  // maxWait defaults to Infinity) had its timer reset before it could ever
+  // elapse: no new tile rasterized until the viewport came fully to rest.
   protected getFrustumChangeQueue = once(() =>
-    debounce(() => this.handleFrustumChange(), this.options.debounceInterval)
+    debounce(() => this.handleFrustumChange(), this.options.debounceInterval, {
+      maxWait: this.options.debounceInterval,
+    })
   );
   protected getBounds(bounds: Body<CompiledD2IntrinsicComponent>[]) {
     return reduce(

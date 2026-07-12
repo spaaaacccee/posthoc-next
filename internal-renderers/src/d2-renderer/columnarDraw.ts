@@ -74,6 +74,21 @@ export function resolveFill(
   return s;
 }
 
+/**
+ * A body's CSS `font`, memoized on its pixel size. Every text body in a tile is
+ * usually the same size, and both the template string and the UA's font-shorthand
+ * parse are otherwise paid once per body per frame.
+ */
+let lastFontSize = NaN;
+let lastFont = "";
+function fontFor(size: number): string {
+  if (size !== lastFontSize) {
+    lastFontSize = size;
+    lastFont = `${size}px Inter, Helvetica, Arial, sans-serif`;
+  }
+  return lastFont;
+}
+
 /** Draw body `i` onto `ctx` under transform `t`. */
 export function drawBody(
   store: SharedComponentStore,
@@ -115,7 +130,7 @@ export function drawBody(
     const str = store.strings[store.label[i]!];
     if (!str) return;
     ctx.fillStyle = style;
-    ctx.font = `${store.size[i]! * t.sx}px Inter, Helvetica, Arial, sans-serif`;
+    ctx.font = fontFor(store.size[i]! * t.sx);
     ctx.fillText(str, store.x[i]! * t.sx + t.x, store.y[i]! * t.sy + t.y);
   } else {
     // rect

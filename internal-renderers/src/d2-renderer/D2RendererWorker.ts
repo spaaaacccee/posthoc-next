@@ -44,9 +44,16 @@ function wordWrap(text: string, width: number) {
   ).text;
 }
 
+/**
+ * Tiles covering `bounds`. Shuffled by default so a frustum resolves in a
+ * scattered order across workers rather than in scanline order — but callers
+ * that only enumerate tiles (the main thread's grid overlay) should pass
+ * `shuffleTiles: false` to skip the copy and the `Math.random` churn.
+ */
 export function getTiles(
   { right, left, bottom, top }: Bounds,
-  tileSubdivision: number
+  tileSubdivision: number,
+  shuffleTiles: boolean = true
 ) {
   const zoom = max(z(right - left), z(bottom - top)) - tileSubdivision;
   const order = 2 ** zoom;
@@ -56,27 +63,26 @@ export function getTiles(
     top: floor(top / order),
     bottom: ceil((bottom + 1) / order),
   };
+  const out = combinate({
+    x: range(tiles.left, tiles.right + 1),
+    y: range(tiles.top, tiles.bottom + 1),
+  }).map((tile) => {
+    const mapX = tile.x * order;
+    const mapY = tile.y * order;
+    return {
+      tile,
+      bounds: {
+        left: mapX - order / 2,
+        right: mapX + order / 2,
+        top: mapY - order / 2,
+        bottom: mapY + order / 2,
+      },
+    };
+  });
   return {
     zoom,
     order,
-    tiles: shuffle(
-      combinate({
-        x: range(tiles.left, tiles.right + 1),
-        y: range(tiles.top, tiles.bottom + 1),
-      }).map((tile) => {
-        const mapX = tile.x * order;
-        const mapY = tile.y * order;
-        return {
-          tile,
-          bounds: {
-            left: mapX - order / 2,
-            right: mapX + order / 2,
-            top: mapY - order / 2,
-            bottom: mapY + order / 2,
-          },
-        };
-      })
-    ),
+    tiles: shuffleTiles ? shuffle(out) : out,
   };
 }
 

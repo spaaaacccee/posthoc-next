@@ -1,18 +1,17 @@
-import { clamp } from "es-toolkit";
-import { ceil, find, floor, forEach, map, times } from "es-toolkit/compat";
+import { once } from "es-toolkit";
+import { ceil, floor, forEach, map, throttle, times } from "es-toolkit/compat";
 import { nanoid } from "nanoid";
 import * as PIXI from "pixi.js";
 import { Bounds } from "protocol";
-import {
-  LayerParams,
-  makeRenderer,
-  SharedComponentStore,
-  SourceHandle,
-} from "renderer";
+import { LayerParams, makeRenderer, SharedComponentStore, SourceHandle } from "renderer";
 import type Flatbush from "flatbush";
 import { D2RendererBase } from "../d2-renderer-base/D2RendererBase";
-import { bodyBounds, buildIndexedGeneration, openIndex, queryVisible } from "./columnarIndex";
-import { D2RendererOptions, defaultD2RendererOptions } from "./D2RendererOptions";
+import { bodyBounds, cacheIndex, cachedIndex, openIndex, queryVisible } from "./columnarIndex";
+import {
+  D2RendererOptions,
+  defaultD2RendererOptions,
+  nextResolutionScale,
+} from "./D2RendererOptions";
 import { D2V2WorkerEvents, getTiles } from "./D2RendererV2Worker";
 import { D2RendererV2WorkerAdapter } from "./D2RendererV2WorkerAdapter";
 import { hash } from "./hash";
@@ -21,11 +20,23 @@ function tileHash(bounds: Bounds) {
   return hash([bounds.top, bounds.right, bounds.bottom, bounds.left]);
 }
 
-/** Bitmap tile sprite, positioned in world space. (Same shape as v1's Tile.) */
+/**
+ * Bitmap tile sprite, positioned in world space.
+ *
+ * A tile **owns its texture**. `PIXI.Texture.from(bitmap)` mints a fresh
+ * `BaseTexture` every call (PIXI can't cache-key an `ImageBitmap`), and PIXI
+ * keeps uploaded base textures alive in `renderer.texture.managedTextures`, so
+ * nothing is reclaimed by GC. Every texture this tile displaces — and every one
+ * it declines — must therefore be destroyed explicitly, or a scrub leaks a
+ * 256² GPU texture per tile per frame.
+ */
 class Tile extends PIXI.Sprite {
   static age: number = 0;
   age: number = Tile.age++;
+  /** Whether a worker has rasterized this tile's current content. */
+  resolved: boolean = false;
   #update(texture: PIXI.Texture, hash: string) {
+    const prev = this.texture;
     const scale = {
       x: (this.bounds.right - this.bounds.left) / texture.width,
       y: (this.bounds.bottom - this.bounds.top) / texture.height,
@@ -34,11 +45,23 @@ class Tile extends PIXI.Sprite {
     this.setTransform(this.bounds.left, this.bounds.top, scale.x, scale.y);
     this.age = Tile.age++;
     this.hash = hash;
+    // `super(texture)` already assigned the same texture on the ctor path.
+    if (prev && prev !== texture && prev !== PIXI.Texture.EMPTY) prev.destroy(true);
   }
   reuse(texture: PIXI.Texture, hash: string) {
-    if (this.hash === hash && this.texture.width * this.texture.height > texture.width * texture.height)
+    if (
+      this.hash === hash &&
+      this.texture.width * this.texture.height > texture.width * texture.height
+    ) {
+      // Keeping the higher-resolution texture we already have — but the caller
+      // minted this one for us, so it's ours to dispose of.
+      texture.destroy(true);
       return;
+    }
     this.#update(texture, hash);
+  }
+  override destroy() {
+    super.destroy({ texture: true, baseTexture: true });
   }
   constructor(
     texture: PIXI.Texture,
@@ -51,6 +74,16 @@ class Tile extends PIXI.Sprite {
     this.#update(texture, hash ?? nanoid());
   }
 }
+
+/**
+ * How many tiles to keep, as a multiple of a frustum's worth. Tiles were
+ * previously only ever added, so panning and zooming accumulated a live sprite
+ * (and, now, a live GPU texture) for every tile of every zoom level ever
+ * visited. A couple of screens of pan history is enough to make backtracking
+ * feel instant.
+ */
+const TILE_BUDGET = 4;
+const MIN_TILE_BUDGET = 64;
 
 type Layer = {
   store: SharedComponentStore;
@@ -68,16 +101,20 @@ type Layer = {
  * no per-renderer rbush copy.
  */
 export class D2RendererV2 extends D2RendererBase {
-  protected declare app?: PIXI.Application<HTMLCanvasElement>;
+  declare protected app?: PIXI.Application<HTMLCanvasElement>;
   protected options: D2RendererOptions = defaultD2RendererOptions;
 
-  #resolved: Record<string, boolean> = {};
   #tiles?: PIXI.Container<Tile>;
+  /** Tiles by key. The container owns render order; this owns lookup — scanning
+   * `#tiles.children` per update made tile bookkeeping quadratic. */
+  #tileIndex = new Map<string, Tile>();
   #grid?: PIXI.Graphics;
   #workers: D2RendererV2WorkerAdapter[] = [];
   #step = 0;
 
   #layers = new Map<SourceHandle, Layer>();
+  /** Handles whose index worker 0 is currently packing → the store it's for. */
+  #pendingIndex = new Map<SourceHandle, SharedComponentStore>();
 
   protected override setupPixi(o: D2RendererOptions) {
     super.setupPixi(o);
@@ -88,7 +125,8 @@ export class D2RendererV2 extends D2RendererBase {
     this.#grid = new PIXI.Graphics();
     this.viewport.addChild(this.#grid);
     this.#startDynamicResolution();
-    this.viewport.on("mousemove", (e) => this.#updateHover(e));
+    this.viewport.on("mousemove", (e) => this.#queueHover(e));
+    this.viewport.on("moved", () => this.#getUpdateGridQueue()());
   }
 
   setup(options: Partial<D2RendererOptions>) {
@@ -98,6 +136,9 @@ export class D2RendererV2 extends D2RendererBase {
 
   destroy(): void {
     map(this.#workers, (w) => w.terminate());
+    if (this.#hoverFrame !== undefined) cancelAnimationFrame(this.#hoverFrame);
+    for (const t of this.#tileIndex.values()) t.destroy();
+    this.#tileIndex.clear();
     super.destroy();
   }
 
@@ -107,14 +148,28 @@ export class D2RendererV2 extends D2RendererBase {
     return () => {};
   }
 
+  /**
+   * Load an immutable generation.
+   *
+   * Packing the Flatbush is O(n log n) with a bbox per body, so it does not
+   * happen here — worker 0 does it and hands the buffer back (see
+   * {@link #handleIndex}). Until it arrives the layer has no `fb` and simply
+   * draws nothing; the workers already handle an index-less layer. The one case
+   * that stays synchronous is a store we've indexed before: re-`load()`ing the
+   * same store (the viewport remounting against a cached store) must not blink.
+   */
   load(store: SharedComponentStore, params: LayerParams = {}): SourceHandle {
     const id = nanoid();
-    const { index } = buildIndexedGeneration(store);
+    const { hit, index } = cachedIndex(store);
     this.#layers.set(id, { store, index, fb: index ? openIndex(index) : undefined, params });
     this.#workers.forEach((w) =>
       w.call("setLayer", [id, { store, index, generation: store.generation }, params]),
     );
-    this.#resolved = {};
+    if (!hit) {
+      this.#pendingIndex.set(id, store);
+      this.#workers[0]?.call("buildLayerIndex", [id]);
+    }
+    this.#clearResolved();
     // Push the current frustum + step so freshly-loaded workers render the
     // visible region immediately instead of their default 256² frustum.
     this.handleFrustumChange();
@@ -124,8 +179,28 @@ export class D2RendererV2 extends D2RendererBase {
 
   unload(handle: SourceHandle): void {
     this.#layers.delete(handle);
+    this.#pendingIndex.delete(handle);
     this.#workers.forEach((w) => w.call("removeLayer", [handle]));
-    this.#resolved = {};
+    this.#clearResolved();
+  }
+
+  #handleIndex({ handle, index }: D2V2WorkerEvents["index"]) {
+    const store = this.#pendingIndex.get(handle);
+    this.#pendingIndex.delete(handle);
+    // Memoize against the store, not the handle: this is what makes a remount
+    // against the same (react-query cached) store take the synchronous path.
+    if (store) cacheIndex(store, index);
+    const layer = this.#layers.get(handle);
+    if (!layer) return; // unloaded while the index was being packed
+    layer.index = index;
+    layer.fb = index ? openIndex(index) : undefined;
+    this.#workers.forEach((w) => w.call("setLayerIndex", [handle, index]));
+    this.#clearResolved();
+    this.handleFrustumChange();
+  }
+
+  #clearResolved() {
+    for (const t of this.#tileIndex.values()) t.resolved = false;
   }
 
   setStep(step: number): void {
@@ -177,6 +252,7 @@ export class D2RendererV2 extends D2RendererBase {
     this.#workers = times(options.workerCount, (i) => {
       const worker = new D2RendererV2WorkerAdapter();
       worker.on("update", (e) => this.#handleUpdate(e));
+      if (i === 0) worker.on("index", (e) => this.#handleIndex(e));
       worker.onerror = (e) => {
         throw e;
       };
@@ -187,19 +263,22 @@ export class D2RendererV2 extends D2RendererBase {
 
   #startDynamicResolution() {
     const { dynamicResolution } = this.options;
-    const { dtMax, dtMin, increment, intervalMs, maxScale, minScale } = dynamicResolution;
+    const { intervalMs, minScale } = dynamicResolution;
     const targetFrames = floor(PIXI.Ticker.targetFPMS * intervalMs);
     let frames = 0;
     let cdt = 0;
-    let scale = 1;
+    let scale = minScale;
     this.app!.ticker.add((dt) => {
       const { tileResolution } = this.options;
       if (!(frames % targetFrames)) {
         const adt = cdt / targetFrames;
-        scale = clamp(adt >= dtMax ? scale + increment : adt <= dtMin ? scale - increment : scale, minScale, maxScale);
+        scale = nextResolutionScale(scale, adt, dynamicResolution);
         map(this.#workers, (w) =>
           w.call("setTileResolution", [
-            { width: ceil(tileResolution.width / scale), height: ceil(tileResolution.height / scale) },
+            {
+              width: ceil(tileResolution.width / scale),
+              height: ceil(tileResolution.height / scale),
+            },
           ]),
         );
         cdt = 0;
@@ -232,19 +311,45 @@ export class D2RendererV2 extends D2RendererBase {
   #addToWorld(bounds: Bounds, nextHash: string, texture?: PIXI.Texture) {
     if (!this.viewport) return;
     const tileKey = tileHash(bounds);
-    const existing = find(this.#tiles?.children, (c) => c.key === tileKey);
+    let tile = this.#tileIndex.get(tileKey);
     if (texture) {
-      if (existing) existing.reuse(texture, nextHash);
-      else this.#tiles!.addChild(new Tile(texture, bounds, tileKey, nextHash));
+      if (tile) tile.reuse(texture, nextHash);
+      else {
+        tile = new Tile(texture, bounds, tileKey, nextHash);
+        this.#tiles!.addChild(tile);
+        this.#tileIndex.set(tileKey, tile);
+        this.#evictTiles();
+      }
     }
-    this.#resolved[tileKey] = true;
-    this.#updateGrid();
+    if (tile) tile.resolved = true;
+    this.#getUpdateGridQueue()();
   }
+
+  /** Drop the oldest tiles once we're over budget, destroying their textures. */
+  #evictTiles() {
+    if (!this.viewport) return;
+    const frustum = getTiles(this.viewport, this.options.tileSubdivision, false).tiles.length;
+    const budget = Math.max(MIN_TILE_BUDGET, frustum * TILE_BUDGET);
+    while (this.#tileIndex.size > budget) {
+      let oldest: Tile | undefined;
+      for (const t of this.#tileIndex.values()) {
+        if (!oldest || t.age < oldest.age) oldest = t;
+      }
+      if (!oldest) return;
+      this.#tileIndex.delete(oldest.key);
+      this.#tiles?.removeChild(oldest);
+      oldest.destroy();
+    }
+  }
+
+  #getUpdateGridQueue = once(() =>
+    throttle(() => this.#updateGrid(), this.options.refreshInterval),
+  );
 
   #updateGrid() {
     if (!this.viewport) return;
     const { tileSubdivision, accentColor } = this.options;
-    const { tiles } = getTiles(this.viewport, tileSubdivision);
+    const { tiles } = getTiles(this.viewport, tileSubdivision, false);
     const px = this.getPx();
     this.#grid?.clear();
     this.#grid?.lineStyle(1 * px, accentColor, 0.5);
@@ -252,9 +357,8 @@ export class D2RendererV2 extends D2RendererBase {
     forEach(this.#tiles?.children, (t) => (t.zIndex = 0));
     let numResolved = 0;
     for (const { bounds: b } of tiles) {
-      const key = tileHash(b);
-      const t = find(this.#tiles?.children, (c) => c.key === key);
-      if (t && this.#resolved[key]) {
+      const t = this.#tileIndex.get(tileHash(b));
+      if (t?.resolved) {
         t.zIndex = 1;
         t.visible = true;
         numResolved++;
@@ -268,6 +372,19 @@ export class D2RendererV2 extends D2RendererBase {
     }
   }
 
+  // Hover ran a spatial query + a full overlay rebuild on every raw mousemove.
+  // Coalesce to one per frame — rAF rather than a throttle, so the rebuild lands
+  // on the frame that will actually display it.
+  #hoverEvent?: PIXI.FederatedPointerEvent;
+  #hoverFrame?: number;
+  #queueHover(e: PIXI.FederatedPointerEvent) {
+    this.#hoverEvent = e;
+    this.#hoverFrame ??= requestAnimationFrame(() => {
+      this.#hoverFrame = undefined;
+      if (this.#hoverEvent) this.#updateHover(this.#hoverEvent);
+    });
+  }
+
   #updateHover(e: PIXI.FederatedPointerEvent) {
     if (!this.viewport || !this.overlay || !this.#layers.size) return;
     const { accentColor } = this.options;
@@ -278,7 +395,8 @@ export class D2RendererV2 extends D2RendererBase {
     this.overlay.lineStyle(2 * px, accentColor, 0.5);
     for (const layer of this.#layers.values()) {
       if (!layer.fb) continue;
-      for (const i of queryVisible(layer.store, layer.fb, point, this.#step)) {
+      // Unsorted: hit-testing doesn't care about draw order.
+      for (const i of queryVisible(layer.store, layer.fb, point, this.#step, { sort: false })) {
         const [minX, minY, maxX, maxY] = bodyBounds(layer.store, i);
         this.overlay.drawRect(minX, minY, maxX - minX, maxY - minY);
       }
