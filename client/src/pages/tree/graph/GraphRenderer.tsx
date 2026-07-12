@@ -12,7 +12,6 @@ import { useEffect, useRef, useState } from "react";
 import { useDebounce } from "react-use";
 import type { LayerShading, SourceHandle } from "renderer";
 import type { GraphStoreResult } from "./buildGraphStore";
-import { graphLayerParams } from "./buildGraphStore";
 
 /**
  * The graph's own renderer instance, deliberately not the viewport's.
@@ -94,7 +93,6 @@ export function GraphRenderer({
 
   const background = theme.palette.background.paper;
   const accent = theme.palette.primary.main;
-  const labelColor = theme.palette.text.secondary;
 
   useEffect(() => {
     if (!ref) return;
@@ -135,16 +133,13 @@ export function GraphRenderer({
     // would be unreadable — and its opacity is a layer param, not a column.
     const g = graph.ghost?.count
       ? renderer.load(graph.ghost, {
-          ...graphLayerParams(labelColor, graph.mode),
+          ...graph.params,
           label: undefined,
           index: 0,
           alpha: ghostAlphaRef.current,
         })
       : undefined;
-    const h = renderer.load(graph.store, {
-      ...graphLayerParams(labelColor, graph.mode),
-      index: 1,
-    });
+    const h = renderer.load(graph.store, { ...graph.params, index: 1 });
     ghostHandle.current = g;
     handle.current = h;
     renderer.setStep(stepRef.current);
@@ -157,7 +152,7 @@ export function GraphRenderer({
     // `ghostAlpha` is applied by the effect below, not here: it is a composite-time
     // param, so re-loading the layer to change it would throw away the tile cache
     // for nothing.
-  }, [renderer, graph, labelColor]);
+  }, [renderer, graph]);
 
   useEffect(() => {
     if (renderer && ghostHandle.current) {

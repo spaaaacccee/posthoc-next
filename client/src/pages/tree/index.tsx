@@ -85,6 +85,7 @@ export function TreePage({ template: Page }: PageContentProps) {
   // The un-searched tree. Faint, but present from step 0, so the shape of the whole
   // search is visible before the playhead reaches it.
   const ghostColor = theme.palette.action.disabledBackground;
+  const labelColor = theme.palette.text.secondary;
 
   const { data: graph, isLoading: isGraphLoading } = useGraphStore({
     key: trace?.key,
@@ -99,6 +100,7 @@ export function TreePage({ template: Page }: PageContentProps) {
     background,
     edgeColor,
     ghostColor,
+    labelColor,
   });
 
   // A focused view is a flat list of step indices, whichever shape it arrived in.

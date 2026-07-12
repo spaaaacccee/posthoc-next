@@ -44,6 +44,7 @@ export const graphStoreQuery = ({ key, trace, ...options }: GraphStoreOptions) =
       options.background,
       options.edgeColor,
       options.ghostColor,
+      options.labelColor,
       options.colors,
       options.layout?.length,
     ],

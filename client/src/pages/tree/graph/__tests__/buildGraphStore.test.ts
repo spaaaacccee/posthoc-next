@@ -52,7 +52,10 @@ const bodiesIn = (store: SharedComponentStore, kind: number) => {
       end: store.end[i],
       ramp: store.ramp![i],
       label: store.strings[store.label[i]!],
-      arrow: store.arrow![i],
+      // Absent when the store has no paths to put arrowheads on — plot mode. The
+      // column is not free merely by being empty: its presence alone inflates every
+      // tile query by an arrowhead's reach (see `screenPad`).
+      arrow: store.arrow?.[i] ?? 0,
     });
   }
   return out;

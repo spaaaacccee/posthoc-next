@@ -7,10 +7,20 @@ import {
   QueryScratch,
   queryVisible,
 } from "internal-renderers/src/d2-renderer/columnarIndex";
-import { pxSize, SPLAT_RADIUS_PX } from "internal-renderers/src/d2-renderer/columnarDraw";
+import {
+  columnarDrawTransform,
+  pxSize,
+  screenPad,
+  SPLAT_RADIUS_PX,
+  type DrawOptions,
+} from "internal-renderers/src/d2-renderer/columnarDraw";
 import { getTiles } from "internal-renderers/src/d2-renderer/D2RendererWorker";
 import type { Trace } from "protocol/Trace-v140";
-import { buildGraphStore, graphLayerParams } from "../buildGraphStore";
+import { buildGraphStore } from "../buildGraphStore";
+
+/** What `GraphRenderer` actually renders under. Both values change the answer. */
+const TILE = { width: 512, height: 512 }; // devicePixelRatio(2) * 2 * TILE_RESOLUTION(128)
+const SUBDIVISION = 3;
 
 /**
  * Scale check against a real trace, in plot mode — the mode that actually reaches
@@ -65,31 +75,63 @@ suite("scale: 717k events, plot mode", () => {
       1e6
     ).toFixed(1);
 
-    // Zoomed all the way out: every body on screen at once. The worst case.
+    // Fitted to the content: every body on screen at once. The worst case.
+    //
+    // Measured at the tiling the app actually renders under — `GraphRenderer` runs
+    // `tileSubdivision: 3` into 512px tiles — because *both* of those decide the
+    // answer. An earlier version of this test measured a single subdivision-0 tile,
+    // whose world-to-pixel scale is 16x smaller, and so concluded the splat path
+    // engaged when in the real renderer it never did.
     const b = result.bounds;
     const frustum = { left: b.minX, right: b.maxX, top: b.minY, bottom: b.maxY };
-    const tiles = getTiles(frustum, 0).tiles;
+    const tiles = getTiles(frustum, SUBDIVISION, false).tiles;
     const scratch = new QueryScratch();
 
     // The last valid step. Spans are half-open, so at `total` nothing is alive.
     const last = store.total - 1;
 
-    let hits = 0;
+    const t = columnarDrawTransform(tiles[0]!.bounds, TILE);
+    const opts: DrawOptions = {
+      step: last,
+      sizing: result.params.sizing,
+      label: result.params.label,
+    };
+
+    let draws = 0;
     let worst = 0;
     const query = ms(() => {
       for (const { bounds } of tiles) {
-        const out = queryVisible(store, fb, bounds, last, { scratch });
-        hits += out.length;
+        const pad = screenPad(store, t.sx, opts);
+        const out = queryVisible(
+          store,
+          fb,
+          {
+            left: bounds.left - pad,
+            right: bounds.right + pad,
+            top: bounds.top - pad,
+            bottom: bounds.bottom + pad,
+          },
+          last,
+          { scratch },
+        );
+        draws += out.length;
         if (out.length > worst) worst = out.length;
       }
     });
 
-    // The pixel radius a node actually draws at when fully zoomed out, resolved
-    // through the same `pxSize` the renderer uses — including the layer's clamp,
-    // which is the thing that decides whether the splat path engages at all.
-    const tileScale = 512 / (tiles[0]!.bounds.right - tiles[0]!.bounds.left);
-    const sizing = graphLayerParams("#000", "plot").sizing!.circle;
-    const nodeRadiusPx = pxSize(2, tileScale, sizing);
+    // The pixel radius a node actually draws at, resolved through the same `pxSize`
+    // the renderer uses, from the size the store actually **packed** — not from a
+    // constant restated here. Restating it is what let the two drift: the store held
+    // 20 world units, this test asserted about 2, and the clamp turned the real
+    // value into a 20px ellipse per point, 717,447 times a frame.
+    const sizing = result.params.sizing!.circle;
+    const nodeRadiusPx = pxSize(store.size[result.nodeOffset]!, t.sx, sizing);
+
+    // How many tiles the average body is drawn into. A body's indexed box is derived
+    // from its `size`, so an oversized radius doesn't just make each draw dearer —
+    // it fans the body out across every tile its box touches, and pays that cost
+    // again in each. At 20 world units against a 64-unit tile that was ~13x.
+    const fanout = draws / store.count;
 
     console.log(
       [
@@ -101,24 +143,25 @@ suite("scale: 717k events, plot mode", () => {
         ``,
         `  buildGraphStore   ${build.toFixed(0)} ms`,
         `  packIndex         ${pack.toFixed(0)} ms`,
-        `  query, ${String(tiles.length).padStart(2)} tiles  ${query.toFixed(1)} ms  (${hits.toLocaleString()} hits, worst tile ${worst.toLocaleString()})`,
+        `  query, ${String(tiles.length).padStart(3)} tiles ${query.toFixed(1)} ms  (${draws.toLocaleString()} draws, worst tile ${worst.toLocaleString()})`,
         ``,
-        `  node radius @ fit-to-content: ${nodeRadiusPx.toFixed(2)} px -> ${nodeRadiusPx <= SPLAT_RADIUS_PX ? "SPLAT (1 fillRect each)" : "ELLIPSE (slow path!)"}`,
+        `  node radius @ fit: ${nodeRadiusPx.toFixed(2)} px -> ${nodeRadiusPx <= SPLAT_RADIUS_PX ? "SPLAT (1 fillRect each)" : "ELLIPSE (slow path!)"}`,
+        `  draws per body:    ${fanout.toFixed(2)}x`,
         ``,
       ].join("\n"),
     );
 
     // One body per event.
     expect(store.count).toBe(trace.events!.length);
-    // Every body found: plot bodies are persistent, so at the last step the whole
-    // cloud is live. (Slightly more than `count`, since a body straddling a tile
-    // edge is returned by both.)
-    expect(hits).toBeGreaterThanOrEqual(store.count);
     // The claim the design rests on: fitted to the viewport, the whole 717k-point
-    // cloud draws through the splat path — one `fillRect` per node, not an
-    // ellipse. If this ever regresses, a fitted scatter strokes 717k ellipses and
-    // the frame budget is gone.
+    // cloud draws through the splat path — one `fillRect` per node, not an ellipse.
+    // If this regresses, a fitted scatter strokes 717k ellipses and the frame budget
+    // is gone.
     expect(nodeRadiusPx).toBeLessThanOrEqual(SPLAT_RADIUS_PX);
+    // And it draws each of them about *once*. This is the half that the radius check
+    // alone misses: the radius sets the cost of one draw, the fan-out sets how many
+    // draws there are, and a bloated `size` inflates both at once.
+    expect(fanout).toBeLessThan(1.2);
   }, 120_000);
 
   it("returns only what is on screen as you zoom in", () => {

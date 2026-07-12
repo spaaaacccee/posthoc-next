@@ -48,16 +48,39 @@ const RAMP_STEPS = 16;
 const FLOOR = 0.25;
 
 /**
- * World radius per unit of `2 + log(visits)`.
+ * World radius per unit of `2 + log(visits)`, **in tree and directed-graph modes
+ * only**.
  *
- * Radii are world-space, so they have to be expressed in the *layout's* units or
- * they render at the wrong scale — and dagre's units are set by its own
+ * Radii there are world-space, so they have to be expressed in the *layout's* units
+ * or they render at the wrong scale — and dagre's units are set by its own
  * `nodesep`/`ranksep` (~50 and 100), not by anything here. A bare radius of 2
  * against a 50-unit node gap is a speck: fitted to the viewport it lands under a
  * pixel and clamps to the floor, which is exactly the "nodes are way too small"
  * failure. Sigma never hit this because its sizes were screen-space.
+ *
+ * It must not touch plot mode. See {@link plotMarkerPx}.
  */
 const NODE_SCALE = 10;
+
+/**
+ * A scatter point's radius, in **screen pixels**.
+ *
+ * Screen-space, and that is the whole point. A plot's world span is a *constant*
+ * ({@link PLOT_SPAN}), not something the trace sets, so a world-space radius is a
+ * fixed fraction of the axis rather than a size: at `NODE_SCALE` a point was 20
+ * world units across a 1000-unit plot — 2% of the whole chart, each — which fitted
+ * to the viewport is a 20px blob drawn 717,447 times, over an index whose boxes are
+ * then so much larger than a tile that every point lands in ~13 of them. That is a
+ * 9.2M-ellipse frame for a 717k-point plot, and it is why this is not a knob shared
+ * with the tree.
+ *
+ * It shrinks as the cloud grows, which is what keeps the splat path (see
+ * `SPLAT_RADIUS_PX`) reachable on the traces that actually need it: past ~100k
+ * points a marker is a density sample rather than a node, and 2px is both legible
+ * and a single `fillRect`. Below that a plot is sparse enough that ellipses are
+ * free, so legibility wins instead.
+ */
+const plotMarkerPx = (n: number): number => (n >= 100_000 ? 2 : n >= 10_000 ? 3 : 5);
 
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
@@ -82,6 +105,8 @@ export type BuildGraphStoreOptions = {
   edgeColor: string;
   /** The un-searched tree, drawn before the playhead reaches it. */
   ghostColor: string;
+  /** Inline node labels. Ignored by plot mode, which has none. */
+  labelColor?: string;
   /** Steps a body takes to fade out. Sigma's equivalent was 400. */
   fadeWindow?: number;
   generation?: number;
@@ -129,8 +154,19 @@ export type GraphStoreResult = {
    * there is nothing to draw before that event exists.
    */
   ghost?: SharedComponentStore;
-  /** The mode it was built for. The layer's sizing policy depends on it. */
+  /** The mode it was built for. */
   mode: GraphMode;
+  /**
+   * The layer's sizing and label policy — returned *with* the store rather than
+   * derived from it later.
+   *
+   * These two have to agree about what the `size` column means, and when they were
+   * authored apart they didn't: the store packed 20 world units while the policy
+   * clamped at 20 *pixels* and a test asserted on a third number entirely, so the
+   * splat LOD the whole design rests on never once ran. Handing them out together
+   * is what stops that recurring — there is now one place that decides.
+   */
+  params: LayerParams;
   /** Plot mode only. */
   scales?: { x: AxisScale; y: AxisScale };
   /** Content bounds in world space, for fitting the camera. */
@@ -193,6 +229,7 @@ export function buildGraphStore({
   background,
   edgeColor,
   ghostColor,
+  labelColor,
   fadeWindow = 400,
   generation = 0,
 }: BuildGraphStoreOptions): GraphStoreResult {
@@ -376,7 +413,11 @@ export function buildGraphStore({
     strings: [""],
     ptOff: sab(Int32Array, 4, n + 1),
     pts: sab(Float32Array, 4, points * 4),
-    arrow: sab(Uint8Array, 1, n),
+    // Only when there are edges to put arrowheads on. An `arrow` column is not
+    // free merely by being empty: `screenPad` inflates every tile query by an
+    // arrowhead's reach the moment the column exists, and plot mode — which has no
+    // paths at all — was paying 32px a side for arrows it cannot draw.
+    arrow: points ? sab(Uint8Array, 1, n) : undefined,
     ramp: sab(Uint8Array, 1, n),
     ramps,
   });
@@ -475,6 +516,11 @@ export function buildGraphStore({
   const visits = new Map<string, number>();
   const strings = store.strings;
   const stringOf = new Map<string, number>();
+  // Plot markers are uniform: in plot mode a body is an *event*, not a node, so
+  // growing the k-th point of a node by how often that node has been seen sizes a
+  // point by something that isn't a property of the point. A tree's circle *is* the
+  // node, so there it means something.
+  const marker = plotMarkerPx(n);
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -496,9 +542,9 @@ export function buildGraphStore({
     store.kind[b] = KIND_CIRCLE;
     store.x[b] = X;
     store.y[b] = Y;
-    // Doubles as the label grid's importance, so a much-visited node keeps its
-    // label when a quiet neighbour loses it.
-    store.size[b] = (2 + Math.log(v)) * NODE_SCALE;
+    // In tree/DAG this doubles as the label grid's importance, so a much-visited
+    // node keeps its label when a quiet neighbour loses it.
+    store.size[b] = persistent ? marker : (2 + Math.log(v)) * NODE_SCALE;
     store.alpha[b] = 1;
     store.start[b] = i;
     store.end[b] = until[i]!;
@@ -520,6 +566,7 @@ export function buildGraphStore({
     store,
     ghost,
     mode,
+    params: layerParams(mode, marker, labelColor),
     scales,
     nodeOffset,
     preRamp: Uint8Array.from(preRamp.slice(0, nodeOffset)),
@@ -551,36 +598,55 @@ function axisOf(events: TraceEvent[], property: string, log: boolean): AxisScale
 /**
  * The sizing and label policy a graph layer renders under.
  *
- * These live in {@link LayerParams} rather than in the store precisely so they can
- * change without a rebuild: node size, edge width and label size are all live
- * sliders, and dragging one re-rasterizes but never repacks a column or rebuilds
- * the spatial index.
+ * These live in {@link LayerParams} rather than in the store so they can change
+ * without a rebuild: node size, edge width and label size are all live sliders, and
+ * dragging one re-rasterizes but never repacks a column or rebuilds the spatial
+ * index. But they are *derived here*, next to the packing they have to agree with —
+ * a policy that reads the `size` column differently from the code that wrote it is
+ * exactly the bug this replaces.
  */
-export const graphLayerParams = (labelColor: string, mode: GraphMode): LayerParams => ({
-  sizing: {
-    // World-space, so nodes spread apart as you zoom in — but clamped, because a
-    // node that keeps growing becomes a blob and one that keeps shrinking
-    // vanishes.
-    //
-    // The floor differs by mode, and both values are load-bearing.
-    //
-    // A **plot** floors at 1. `drawBody` splats a rect rather than stroking an
-    // ellipse at or below 2px, and that splat is what stops fill rate scaling with
-    // node count — a fitted 717k-point scatter draws every node through it. Floor it
-    // higher and the LOD path exists but never runs.
-    //
-    // A **tree** floors at 3, because it has one node per *unique id* (25k on the
-    // same trace, not 717k), so ellipses are affordable and legibility wins: at 1px
-    // a fitted tree is a smear of dots, which is exactly what "nodes are way too
-    // small" looked like.
-    circle: mode === "plot" ? { min: 1, max: 20 } : { min: 3, max: 24 },
-    path: { min: 1, max: 6 },
-  },
-  label: {
-    size: 12,
-    color: labelColor,
-    offset: 4,
-    // One label per cell. Sized so a 512px tile holds ~8x16 of them.
-    grid: { width: 64, height: 32 },
-  },
-});
+function layerParams(mode: GraphMode, marker: number, labelColor = "#888888"): LayerParams {
+  if (mode === "plot") {
+    return {
+      sizing: {
+        // Screen-space: a scatter point is a *marker*, and a marker does not grow
+        // when you zoom — you zoom a plot to separate points, not to enlarge them.
+        // `max` at the splat radius makes the LOD structural rather than incidental:
+        // `drawBody` cannot reach the ellipse branch from here, so a fitted 717k
+        // cloud is 717k `fillRect`s no matter where the camera is. (See
+        // `plotMarkerPx` for why world-space sizing was catastrophic.)
+        //
+        // It also keeps each point's *indexed box* small — `bodyBounds` reads the
+        // same column — so a point lands in one tile instead of thirteen.
+        circle: { screen: true, min: 1, max: Math.max(marker, 2) },
+      },
+      // No labels. A plot body is an event, so a node visited 30 times contributes
+      // 30 points all bearing the same id — noise at any zoom, and not cheap noise:
+      // a label policy inflates every tile query by its own widest possible label
+      // (~196px a side here), which on this store is a ~4x overdraw, plus a grid
+      // pass and a set lookup per body per frame.
+      //
+      // The `label` *column* stays populated regardless: the hit-test reads it to
+      // name a clicked point.
+    };
+  }
+  return {
+    sizing: {
+      // World-space, so nodes spread apart as you zoom in — but clamped, because a
+      // node that keeps growing becomes a blob and one that keeps shrinking
+      // vanishes. Floored at 3 rather than 1 because a tree draws one circle per
+      // *unique id* (25k on the trace where the plot has 717k points), so ellipses
+      // are affordable and legibility wins: at 1px a fitted tree is a smear of dots,
+      // which is what "nodes are way too small" looked like.
+      circle: { min: 3, max: 24 },
+      path: { min: 1, max: 6 },
+    },
+    label: {
+      size: 12,
+      color: labelColor,
+      offset: 4,
+      // One label per cell. Sized so a 512px tile holds ~8x16 of them.
+      grid: { width: 64, height: 32 },
+    },
+  };
+}
