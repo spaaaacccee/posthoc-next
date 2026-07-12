@@ -8,6 +8,7 @@ import type Flatbush from "flatbush";
 import { D2RendererBase } from "../d2-renderer-base/D2RendererBase";
 import { bodyBounds, cacheIndex, cachedIndex, openIndex, queryVisible } from "./columnarIndex";
 import {
+  D2BodyHit,
   D2RendererOptions,
   defaultD2RendererOptions,
   nextResolutionScale,
@@ -134,6 +135,33 @@ export class D2RendererV2 extends D2RendererBase {
     this.#startDynamicResolution();
     this.viewport.on("mousemove", (e) => this.#queueHover(e));
     this.viewport.on("moved", () => this.#getUpdateGridQueue()());
+    this.viewport.on("clicked", (e) => this.#click(e));
+  }
+
+  /**
+   * Report the bodies under the pointer as (layer, index) pairs.
+   *
+   * The base class also fires `click` here, but it resolves against `this.system`
+   * — the rbush the v1 `add()` path fills, which v2 leaves empty — so that event
+   * carries nothing. This queries the same shared Flatbush the renderer draws
+   * from, so hit-testing needs no second index and no per-body objects.
+   *
+   * Topmost first: bodies draw in ascending index order, so the highest index is
+   * the one on top. A graph packs edges before nodes precisely so that clicking
+   * where a node overlaps its edge selects the node.
+   */
+  #click(e: { world: PIXI.Point; event: Event }) {
+    const { x, y } = e.world;
+    const point = { left: x, top: y, right: x + Number.MIN_VALUE, bottom: y + Number.MIN_VALUE };
+    const bodies: D2BodyHit[] = [];
+    for (const [handle, layer] of this.#layers) {
+      if (!layer.fb) continue;
+      for (const i of queryVisible(layer.store, layer.fb, point, this.#step, { sort: false })) {
+        bodies.push({ handle, index: i });
+      }
+    }
+    bodies.sort((a, b) => b.index - a.index);
+    this.emit("clickBody", e.event, { world: { x, y }, bodies });
   }
 
   setup(options: Partial<D2RendererOptions>) {

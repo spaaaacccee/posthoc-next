@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { shadeOf } from "renderer";
 import type { Trace } from "protocol/Trace-v140";
-import { applyScale, buildGraphStore, invertScale, type NodeLayout } from "../buildGraphStore";
+import {
+  applyScale,
+  buildGraphStore,
+  eventOf,
+  invertScale,
+  type NodeLayout,
+} from "../buildGraphStore";
 
 const colors = { generating: "#0000ff", expanding: "#ff0000", "": "#888888" };
 const base = {
@@ -248,5 +254,23 @@ describe("buildGraphStore: degenerate input", () => {
     };
     const nodes = bodiesOf(build({ trace: flat, mode: "plot", x: "g", y: "g" }), 1);
     expect(nodes.every((n) => Number.isFinite(n.x!))).toBe(true);
+  });
+});
+
+describe("eventOf", () => {
+  it("maps a clicked body index straight back to its event", () => {
+    // The whole hit-test. The renderer hands back a body index; nodes are packed
+    // after edges, so subtracting the edge count recovers the event with no lookup
+    // table and no second index.
+    const r = build(); // 2 edges, then 4 nodes
+    expect(r.edgeCount).toBe(2);
+    expect(eventOf(r, 2)).toBe(0);
+    expect(eventOf(r, 5)).toBe(3);
+  });
+
+  it("reports an edge click as no event", () => {
+    const r = build();
+    expect(eventOf(r, 0)).toBeUndefined();
+    expect(eventOf(r, 1)).toBeUndefined();
   });
 });

@@ -96,7 +96,18 @@ export type GraphStoreResult = {
   scales?: { x: AxisScale; y: AxisScale };
   /** Content bounds in world space, for fitting the camera. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  /**
+   * Bodies packed ahead of the nodes. Node body `i` is event `i - edgeCount`, and
+   * that identity is the entire hit-test: the renderer reports a clicked *body
+   * index*, and this maps it straight back to the event the user clicked, with no
+   * second index and no lookup table.
+   */
+  edgeCount: number;
 };
+
+/** The event a clicked body refers to, or `undefined` if an edge was clicked. */
+export const eventOf = (r: GraphStoreResult, body: number): number | undefined =>
+  body >= r.edgeCount ? body - r.edgeCount : undefined;
 
 /** symlog: linear near zero, logarithmic beyond it. Matches d3's scaleSymlog. */
 const symlog = (v: number) => Math.sign(v) * Math.log1p(Math.abs(v));
@@ -317,7 +328,9 @@ export function buildGraphStore({
   }
   // `b` may now trail `nEdge`: an edge whose endpoints never resolved was skipped,
   // leaving unused trailing slots. `store.count` is set from `b` at the end, so
-  // they are never read.
+  // they are never read. Node bodies start here, which is what makes a clicked
+  // body index invertible back to an event (see `eventOf`).
+  const edgeCount = b;
 
   const visits = new Map<string, number>();
   const strings = store.strings;
@@ -366,6 +379,7 @@ export function buildGraphStore({
   return {
     store,
     scales,
+    edgeCount,
     bounds: n ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: PLOT_SPAN, maxY: PLOT_SPAN },
   };
 }

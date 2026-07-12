@@ -1,4 +1,4 @@
-import { Renderer, RendererEvents, RendererOptions } from "renderer";
+import { Renderer, RendererEvents, RendererOptions, SourceHandle } from "renderer";
 import { CompiledD2IntrinsicComponent } from "./D2IntrinsicComponents";
 
 export type Size = {
@@ -88,7 +88,26 @@ export const defaultD2RendererOptions: D2RendererOptions = {
   },
 };
 
-export type D2RendererEvents = RendererEvents & {};
+/** A body under the pointer, as a (layer, body index) pair into its store. */
+export type D2BodyHit = {
+  handle: SourceHandle;
+  index: number;
+};
+
+export type D2RendererEvents = RendererEvents & {
+  /**
+   * Columnar hit-test: the bodies under the pointer, topmost first.
+   *
+   * The inherited `click` event resolves against `D2RendererBase.system`, an rbush
+   * populated by the v1 `add()` path — which v2 deliberately leaves inert, so
+   * `click` fires on a v2 renderer with an empty component list and selection
+   * silently does nothing. There is no per-body object to hand back here anyway:
+   * v2 holds columns, not components. So it reports *indices*, and the consumer
+   * (which packed the store, and therefore knows what body `i` means) maps them
+   * back.
+   */
+  clickBody: (e: Event, hit: { world: Point; bodies: D2BodyHit[] }) => void;
+};
 
 export type D2RendererInterface = Renderer<
   D2RendererOptions,
