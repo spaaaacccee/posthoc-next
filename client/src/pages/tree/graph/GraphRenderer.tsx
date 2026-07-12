@@ -2,7 +2,11 @@ import { useTheme } from "@mui/material";
 import { clamp } from "es-toolkit";
 import { floor } from "es-toolkit/compat";
 import { D2RendererV2 } from "internal-renderers/src/d2-renderer/D2RendererV2";
-import type { D2BodyHit } from "internal-renderers/src/d2-renderer/D2RendererOptions";
+import {
+  defaultD2RendererOptions,
+  type D2BodyHit,
+  type D2RendererOptions,
+} from "internal-renderers/src/d2-renderer/D2RendererOptions";
 import { isMobile } from "mobile-device-detect";
 import { useEffect, useRef, useState } from "react";
 import { useDebounce } from "react-use";
@@ -31,14 +35,13 @@ import { graphLayerParams } from "./buildGraphStore";
  */
 const TILE_RESOLUTION = 128;
 
-const rendererOptions = {
+const tile = devicePixelRatio * 2 * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
+
+const rendererOptions: Partial<D2RendererOptions> = {
   tileSubdivision: isMobile ? 2 : 3,
   workerCount: clamp(floor(navigator.hardwareConcurrency / 4), 1, 12),
-  tileResolution: {
-    width: devicePixelRatio * 2 * TILE_RESOLUTION * (isMobile ? 0.25 : 1),
-    height: devicePixelRatio * 2 * TILE_RESOLUTION * (isMobile ? 0.25 : 1),
-  },
-  dynamicResolution: { enabled: false } as never,
+  tileResolution: { width: tile, height: tile },
+  dynamicResolution: { ...defaultD2RendererOptions.dynamicResolution, enabled: false },
 };
 
 export type GraphRendererProps = {
@@ -47,6 +50,12 @@ export type GraphRendererProps = {
   graph?: GraphStoreResult;
   step: number;
   shading?: LayerShading;
+  /**
+   * Opacity of the un-searched tree. A layer param, so dragging it re-composites
+   * from the tile cache — it never re-rasterizes, repacks a column, or rebuilds an
+   * index.
+   */
+  ghostAlpha?: number;
   /** A body was clicked, topmost first. `undefined` when empty space was hit. */
   onClickBody?: (hit: D2BodyHit | undefined, event: Event) => void;
   /** Bumped to refit the camera. */
@@ -61,6 +70,7 @@ export function GraphRenderer({
   graph,
   step,
   shading,
+  ghostAlpha = 0.4,
   onClickBody,
   fitKey,
   onRenderer,
@@ -69,6 +79,7 @@ export function GraphRenderer({
   const [ref, setRef] = useState<HTMLElement | null>(null);
   const [renderer, setRenderer] = useState<D2RendererV2>();
   const handle = useRef<SourceHandle | undefined>(undefined);
+  const ghostHandle = useRef<SourceHandle | undefined>(undefined);
   // Read, never depended on: the load effect must not re-run when the playhead
   // moves (that would rebuild the spatial index 24x a second), but it does need the
   // current step to seed a freshly-loaded layer. A ref rather than an
@@ -76,6 +87,10 @@ export function GraphRenderer({
   // of optimizing this component entirely.
   const stepRef = useRef(step);
   stepRef.current = step;
+  // Same reason as `stepRef`: read to seed the layer, but changing it must not
+  // reload the layer — it is applied at composite time by the effect below.
+  const ghostAlphaRef = useRef(ghostAlpha);
+  ghostAlphaRef.current = ghostAlpha;
 
   const background = theme.palette.background.paper;
   const accent = theme.palette.primary.main;
@@ -115,14 +130,40 @@ export function GraphRenderer({
   // separately below, and neither repacks a column or rebuilds the index.
   useEffect(() => {
     if (!renderer || !graph?.store.count) return;
-    const h = renderer.load(graph.store, graphLayerParams(labelColor, graph.mode));
+    // Ghosts underneath (index 0), the graph on top (index 1). The ghost layer
+    // carries no labels — a faint duplicate of every node's id under the real one
+    // would be unreadable — and its opacity is a layer param, not a column.
+    const g = graph.ghost?.count
+      ? renderer.load(graph.ghost, {
+          ...graphLayerParams(labelColor, graph.mode),
+          label: undefined,
+          index: 0,
+          alpha: ghostAlphaRef.current,
+        })
+      : undefined;
+    const h = renderer.load(graph.store, {
+      ...graphLayerParams(labelColor, graph.mode),
+      index: 1,
+    });
+    ghostHandle.current = g;
     handle.current = h;
     renderer.setStep(stepRef.current);
     return () => {
       handle.current = undefined;
+      ghostHandle.current = undefined;
       renderer.unload(h);
+      if (g) renderer.unload(g);
     };
+    // `ghostAlpha` is applied by the effect below, not here: it is a composite-time
+    // param, so re-loading the layer to change it would throw away the tile cache
+    // for nothing.
   }, [renderer, graph, labelColor]);
+
+  useEffect(() => {
+    if (renderer && ghostHandle.current) {
+      renderer.setLayerParams(ghostHandle.current, { alpha: ghostAlpha });
+    }
+  }, [renderer, ghostAlpha, graph]);
 
   useEffect(() => {
     renderer?.setStep(step);
@@ -140,7 +181,13 @@ export function GraphRenderer({
 
   useEffect(() => {
     if (!renderer || !onClickBody) return;
-    const f = (e: Event, hit: { bodies: D2BodyHit[] }) => onClickBody(hit.bodies[0], e);
+    const f = (e: Event, hit: { bodies: D2BodyHit[] }) =>
+      // Ghosts are not clickable: they are the *un*-searched tree, so there is no
+      // event behind them to select.
+      onClickBody(
+        hit.bodies.find((x) => x.handle === handle.current),
+        e,
+      );
     renderer.on("clickBody", f);
     return () => void renderer.off("clickBody", f);
   }, [renderer, onClickBody]);

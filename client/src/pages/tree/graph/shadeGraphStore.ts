@@ -35,10 +35,13 @@ export type ShadeGraphStoreOptions = {
   /** Bodies packed before the nodes; node body `i` is event `i - nodeOffset`. */
   nodeOffset: number;
   /**
-   * Ramp id per pre-node body, from the build (0 = ghost). Reused rather than
-   * re-derived: an edge's colour comes from its child's event type, and rebuilding
-   * the edge set here just to recover that would be a second O(n) pass over the
-   * trace for information we already had.
+   * Ramp id per edge body, from the build. Reused rather than re-derived: an edge's
+   * colour comes from its child's event type, and rebuilding the edge set here just
+   * to recover that would be a second O(n) pass over the trace for information we
+   * already had.
+   *
+   * (The ghosts are a separate layer and are never shaded — their colour does not
+   * depend on the playhead, on a highlight, or on any property.)
    */
   preRamp: Uint8Array;
   events?: TraceEvent[];
@@ -47,7 +50,6 @@ export type ShadeGraphStoreOptions = {
   colors: Record<string, string>;
   background: string;
   edgeColor: string;
-  ghostColor: string;
   fadeWindow?: number;
 
   /**
@@ -88,7 +90,6 @@ export function shadeGraphStore({
   colors,
   background,
   edgeColor,
-  ghostColor,
   fadeWindow = 400,
   highlight,
   highlightColor = "#00bcd4",
@@ -102,24 +103,17 @@ export function shadeGraphStore({
   const ramps: ColorRamp[] = [];
 
   const edgeFill = palette.push(edgeColor) - 1;
-  const ghostFill = palette.push(ghostColor) - 1;
 
   // A focused view or a property scale replaces the recency ramp rather than
   // layering on top of it. Two colour signals on one node is unreadable, and the
   // user asked a different question.
   const flat = !!highlight?.length || !!trackedProperty;
 
-  // Ghosts and edges are the same in every mode: a ghost stays a ghost, and an edge
-  // keeps the ramp its child node gave it at build time.
-  const restorePre = () => {
+  /** Every edge keeps the ramp its child node gave it at build time. */
+  const restoreEdges = () => {
     for (let b = 0; b < nodeOffset; b++) {
-      const r = preRamp[b] ?? 0;
-      if (r) {
-        ramp[b] = r;
-        fill[b] = edgeFill;
-      } else {
-        fill[b] = ghostFill;
-      }
+      ramp[b] = preRamp[b] ?? 0;
+      fill[b] = edgeFill;
     }
   };
 
@@ -139,7 +133,7 @@ export function shadeGraphStore({
       ramps.push({ offset, length: RAMP_STEPS, window: fadeWindow });
       rampOf.set(type, ramps.length);
     }
-    restorePre();
+    restoreEdges();
     for (let b = nodeOffset; b < count; b++) {
       ramp[b] = rampOf.get(String(events[b - nodeOffset]?.type ?? "")) ?? 0;
     }
@@ -153,7 +147,7 @@ export function shadeGraphStore({
     const dim = palette.push(interpolate([colors[""] ?? "#888888", background])(0.85)) - 1;
     const hot = palette.push(highlightColor) - 1;
     fill.fill(dim);
-    for (let b = 0; b < nodeOffset; b++) fill[b] = ghostFill;
+    for (let b = 0; b < nodeOffset; b++) fill[b] = edgeFill;
     for (const step of highlight) {
       const b = nodeOffset + step;
       if (b < count) fill[b] = hot;
@@ -180,7 +174,7 @@ export function shadeGraphStore({
     max = 1;
   }
 
-  restorePre();
+  restoreEdges();
   for (let b = nodeOffset; b < count; b++) {
     const t = (num(events[b - nodeOffset]?.[trackedProperty!]) - min) / (max - min);
     const k = Math.min(BUCKETS - 1, Math.max(0, Math.floor(t * BUCKETS)));

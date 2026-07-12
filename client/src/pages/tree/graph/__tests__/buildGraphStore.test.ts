@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { shadeOf } from "renderer";
 import type { Trace } from "protocol/Trace-v140";
+import type { SharedComponentStore } from "renderer";
 import {
   applyScale,
   buildGraphStore,
@@ -37,17 +38,10 @@ const layout = (): NodeLayout[] => [
 const build = (o: Partial<Parameters<typeof buildGraphStore>[0]> = {}) =>
   buildGraphStore({ trace: trace(), mode: "tree", layout: layout(), ...base, ...o });
 
-/**
- * Real (non-ghost) bodies of a kind. 1 = circle, 2 = path.
- *
- * Ghosts are packed ahead of everything, so they are skipped by starting past
- * them: a ghost is any pre-node body whose `preRamp` is 0.
- */
-const bodiesOf = (r: ReturnType<typeof buildGraphStore>, kind: number) => {
-  const { store } = r;
-  const ghosts = [...r.preRamp].filter((x) => x === 0).length;
+/** Bodies of a kind, from a store. 1 = circle, 2 = path. */
+const bodiesIn = (store: SharedComponentStore, kind: number) => {
   const out = [];
-  for (let i = ghosts; i < store.count; i++) {
+  for (let i = 0; i < store.count; i++) {
     if (store.kind[i] !== kind) continue;
     out.push({
       i,
@@ -63,6 +57,9 @@ const bodiesOf = (r: ReturnType<typeof buildGraphStore>, kind: number) => {
   }
   return out;
 };
+
+/** Bodies of the graph proper. The ghosts are their own store now. */
+const bodiesOf = (r: ReturnType<typeof buildGraphStore>, kind: number) => bodiesIn(r.store, kind);
 
 describe("buildGraphStore: bodies", () => {
   it("emits one node body per event, not per node", () => {
@@ -284,7 +281,7 @@ describe("buildGraphStore: degenerate input", () => {
     // throw and does not emit NaN positions into the spatial index, which would
     // poison the Flatbush build.
     const r = build({ layout: [] });
-    expect(r.store.count).toBe(11); // 5 ghosts + 2 edges + 4 nodes, all at the origin
+    expect(r.store.count).toBe(6); // 2 edge bodies + 4 node bodies, all at the origin
     for (let i = 0; i < r.store.count; i++) {
       expect(r.store.x[i]).toBe(0);
       expect(r.store.y[i]).toBe(0);
@@ -314,7 +311,7 @@ describe("eventOf", () => {
     expect(eventOf(r, r.nodeOffset + 3)).toBe(3);
   });
 
-  it("reports a ghost or edge click as no event", () => {
+  it("reports an edge click as no event", () => {
     const r = build();
     expect(eventOf(r, 0)).toBeUndefined();
     expect(eventOf(r, r.nodeOffset - 1)).toBeUndefined();
@@ -322,21 +319,24 @@ describe("eventOf", () => {
 });
 
 describe("buildGraphStore: the ghost tree", () => {
-  it("draws every node and edge from step 0, giving way as the search arrives", () => {
-    // The shape of the whole search is visible before the playhead reaches it. One
-    // ghost per *unique node*, not per event — and it dies exactly as its real body
-    // is born, so the two are never both on screen.
+  it("is its own store, so its opacity can be a layer param", () => {
+    // Separate rather than mixed in: `LayerParams.alpha` is applied at *composite*
+    // time, so a ghost-opacity slider re-composites from the tile cache. Baked into
+    // the store's `alpha` column it would be a repack plus an index rebuild per drag.
     const r = build(); // ids a, b, c; edges b->a, c->b
-    const ghosts = [...r.preRamp].filter((x) => x === 0).length;
-    expect(ghosts).toBe(3 + 2); // 3 ghost nodes + 2 ghost edges
+    expect(r.ghost).toBeDefined();
+    expect(r.ghost!.count).toBe(3 + 2); // 3 ghost nodes + 2 ghost edges
+    // And the graph proper holds no ghosts.
+    expect(r.store.count).toBe(2 + 4); // 2 edge bodies + 4 node bodies
+  });
 
-    // `a` is first reached at step 0, `c` at step 2.
-    const ghostNodes = [];
-    for (let i = 0; i < r.nodeOffset; i++) {
-      if (r.store.kind[i] === 1) ghostNodes.push([r.store.start[i], r.store.end[i]]);
-    }
+  it("gives way exactly as the search arrives", () => {
+    // One ghost per *unique node*, not per event, spanning [0, firstStep) — so it is
+    // showing precisely while the real body is not.
+    const r = build();
+    const ghostNodes = bodiesIn(r.ghost!, 1).map((g) => [g.start, g.end]);
     expect(ghostNodes).toEqual([
-      [0, 0], // a: born at step 0, so its ghost never shows
+      [0, 0], // a: first reached at step 0, so its ghost never shows
       [0, 1], // b
       [0, 2], // c
     ]);
@@ -346,7 +346,19 @@ describe("buildGraphStore: the ghost tree", () => {
     // A scatter point's position comes from its own event, so there is nothing to
     // draw before that event exists.
     const r = build({ mode: "plot" });
+    expect(r.ghost).toBeUndefined();
     expect(r.nodeOffset).toBe(0);
-    expect(r.preRamp).toHaveLength(0);
+  });
+});
+
+describe("buildGraphStore: the step axis", () => {
+  it("resolves `step` as the event index, not as a property", () => {
+    // `step` is synthetic. Read off the event like any other metric it is
+    // `undefined -> NaN -> 0`, and every point collapses into one column.
+    const r = build({ mode: "plot", x: "step", y: "g" });
+    expect(r.scales!.x).toMatchObject({ min: 0, max: 3 });
+    // Spread evenly across the world span, one column per step — not all on zero.
+    const xs = bodiesOf(r, 1).map((nd) => nd.x!);
+    for (const [k, x] of xs.entries()) expect(x).toBeCloseTo((k / 3) * 1000, 3);
   });
 });

@@ -138,7 +138,7 @@ export class D2RendererV2 extends D2RendererBase {
     this.viewport.addChild(this.#tiles);
     this.#grid = new PIXI.Graphics();
     this.viewport.addChild(this.#grid);
-    this.#startDynamicResolution();
+    this.#startDynamicResolution(o);
     this.viewport.on("mousemove", (e) => this.#queueHover(e));
     this.viewport.on("moved", () => this.#getUpdateGridQueue()());
     this.viewport.on("clicked", (e) => this.#click(e));
@@ -152,22 +152,29 @@ export class D2RendererV2 extends D2RendererBase {
    * carries nothing. This queries the same shared Flatbush the renderer draws
    * from, so hit-testing needs no second index and no per-body objects.
    *
-   * Topmost first: bodies draw in ascending index order, so the highest index is
-   * the one on top. A graph packs edges before nodes precisely so that clicking
-   * where a node overlaps its edge selects the node.
+   * Topmost first, which means sorting by the *layer's* draw order before the body
+   * index: indices are per-store, so comparing them across layers is meaningless —
+   * body 5 of a layer underneath is not "above" body 3 of the layer on top. Within a
+   * layer, bodies draw in ascending index order, so the highest index is on top. (A
+   * graph packs edges before nodes precisely so that clicking where a node overlaps
+   * its own edge selects the node.)
    */
   #click(e: { world: PIXI.Point; event: Event }) {
     const { x, y } = e.world;
     const point = { left: x, top: y, right: x + Number.MIN_VALUE, bottom: y + Number.MIN_VALUE };
-    const bodies: D2BodyHit[] = [];
+    const bodies: (D2BodyHit & { z: number })[] = [];
     for (const [handle, layer] of this.#layers) {
       if (!layer.fb) continue;
+      const z = layer.params.index ?? 0;
       for (const i of queryVisible(layer.store, layer.fb, point, this.#step, { sort: false })) {
-        bodies.push({ handle, index: i });
+        bodies.push({ handle, index: i, z });
       }
     }
-    bodies.sort((a, b) => b.index - a.index);
-    this.emit("clickBody", e.event, { world: { x, y }, bodies });
+    bodies.sort((a, b) => b.z - a.z || b.index - a.index);
+    this.emit("clickBody", e.event, {
+      world: { x, y },
+      bodies: bodies.map(({ handle, index }) => ({ handle, index })),
+    });
   }
 
   setup(options: Partial<D2RendererOptions>) {
@@ -323,8 +330,16 @@ export class D2RendererV2 extends D2RendererBase {
     });
   }
 
-  #startDynamicResolution() {
-    const { dynamicResolution } = this.options;
+  /**
+   * Note this takes its options as an argument rather than reading `this.options`.
+   *
+   * `D2RendererBase.setup` calls `setupPixi(o)` *before* `setOptions(o)`, so at this
+   * point `this.options` is still the class-field default — and reading the disable
+   * flag from it would find `undefined` rather than `false`, silently starting the
+   * ticker on a renderer that asked for it to be off.
+   */
+  #startDynamicResolution(o: D2RendererOptions) {
+    const { dynamicResolution } = o;
     // Off: leave tiles pinned at `tileResolution`. Guarded here rather than by
     // setting minScale === maxScale, which would still post a setTileResolution to
     // every worker on every tick for the life of the renderer.

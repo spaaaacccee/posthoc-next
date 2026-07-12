@@ -83,7 +83,6 @@ export const graphShadingQuery = ({ key, trace, ...options }: GraphShadingOption
       options.highlightColor,
       options.background,
       options.edgeColor,
-      options.ghostColor,
       options.colors,
       options.fadeWindow,
       options.geometry.count,

@@ -59,9 +59,6 @@ const FLOOR = 0.25;
  */
 const NODE_SCALE = 10;
 
-/** Opacity of the un-searched tree. Enough to read the shape, not enough to shout. */
-const GHOST_ALPHA = 0.4;
-
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
 /** A node's laid-out position, from dagre. Keyed by `String(event.id)`. */
@@ -94,6 +91,17 @@ export type BuildGraphStoreOptions = {
 const PLOT_SPAN = 1000;
 
 /**
+ * The synthetic "step" axis: an event's *index*, not a property on it.
+ *
+ * Reading it off the event like any other metric yields `undefined -> NaN -> 0`, so
+ * every point lands in the same column and the plot collapses to a line. It has to
+ * be resolved against the event's position in the trace instead.
+ */
+export const METRIC_STEP = "step";
+const metric = (e: TraceEvent, i: number, property: string): number =>
+  property === METRIC_STEP ? i : num(e[property]);
+
+/**
  * How a plot axis maps a data value onto a world coordinate. Returned so the axis
  * overlay can invert it to place ticks — the renderer itself neither knows nor
  * cares that a log scale exists, because the scale is applied here, at pack time.
@@ -108,6 +116,19 @@ export type AxisScale = {
 
 export type GraphStoreResult = {
   store: SharedComponentStore;
+  /**
+   * The un-searched tree, as its own layer.
+   *
+   * Separate rather than mixed in, because its opacity then lives in
+   * {@link LayerParams} — which is applied when the layer is *composited*, so it
+   * re-composites from the tile cache instead of re-rasterizing. That makes ghost
+   * opacity a live slider, which a per-body alpha baked into the store could never
+   * be: changing it would mean repacking the column and rebuilding the index.
+   *
+   * Absent in plot mode: a scatter point's position comes from its own event, so
+   * there is nothing to draw before that event exists.
+   */
+  ghost?: SharedComponentStore;
   /** The mode it was built for. The layer's sizing policy depends on it. */
   mode: GraphMode;
   /** Plot mode only. */
@@ -203,7 +224,6 @@ export function buildGraphStore({
   // The un-searched tree: visible from step 0, so the shape of the whole search is
   // there before the playhead reaches it.
   const ghostFill = palette.push(ghostColor) - 1;
-  const uniqueIds = new Set(events.map((e) => String(e.id)));
 
   // ---- Positions.
   //
@@ -225,8 +245,8 @@ export function buildGraphStore({
   for (let i = 0; i < n; i++) {
     const e = events[i]!;
     if (mode === "plot") {
-      px[i] = applyScale(scales!.x, num(e[scales!.x.property]));
-      py[i] = applyScale(scales!.y, num(e[scales!.y.property]));
+      px[i] = applyScale(scales!.x, metric(e, i, scales!.x.property));
+      py[i] = applyScale(scales!.y, metric(e, i, scales!.y.property));
     } else {
       const l = nodes.get(String(e.id));
       // Rotation swaps the axes on the *positions*, not in dagre — the layout is
@@ -312,46 +332,22 @@ export function buildGraphStore({
   }
 
   // ---- Pack, in draw order. `queryVisible` returns indices ascending, so body
-  // order *is* draw order, and the layers stack: ghosts, then edges, then nodes.
+  // order *is* draw order: edges, then nodes, so a node sits above its own edges.
   //
-  // The **ghosts** are the faint outline of the whole tree, drawn before the search
-  // reaches it. Each unique node and each edge gets one extra body spanning
-  // `[0, firstStep)` — so it is showing exactly while the real body is not, and the
-  // two are disjoint. That gives the structure of the search up front and costs one
-  // body per node rather than one per event.
+  // The **ghosts** — the faint outline of the whole search, present from step 0 —
+  // are packed into a *separate store* and loaded as their own layer, under this
+  // one. That is what lets their opacity be a `LayerParams.alpha`, applied when the
+  // layer is composited rather than baked into an `alpha` column: it re-composites
+  // straight from the tile cache, so ghost opacity is a live slider. Baked into the
+  // store it would be a repack and an index rebuild per drag.
   //
-  // Plot mode has no ghosts: a scatter point's position comes from its own event, so
+  // A ghost spans `[0, firstStep)` — showing exactly while its real body is not —
+  // and there is one per unique node and per edge, not one per event.
+  //
+  // Plot mode has none: a scatter point's position comes from its own event, so
   // there is nothing to draw before that event exists.
-  const ghosts = mode === "plot" ? 0 : uniqueIds.size + edges.size;
   const nEdge = edgeEvents.length;
-  const count = ghosts + nEdge + n;
-  // Held locally as well as on the store: they are optional on
-  // `SharedComponentStore` (a map layer has neither), but this function always
-  // writes them, and the narrow local types save an assertion on every access.
-  const arrow = sab(Uint8Array, 1, count);
-  const ramp = sab(Uint8Array, 1, count);
-  const store: SharedComponentStore = {
-    generation,
-    count,
-    total,
-    kind: sab(Uint8Array, 1, count),
-    x: sab(Float32Array, 4, count),
-    y: sab(Float32Array, 4, count),
-    size: sab(Float32Array, 4, count),
-    size2: sab(Float32Array, 4, count),
-    alpha: sab(Float32Array, 4, count),
-    start: sab(Int32Array, 4, count),
-    end: sab(Int32Array, 4, count),
-    fill: sab(Int32Array, 4, count),
-    palette,
-    label: sab(Int32Array, 4, count),
-    strings: [""],
-    ptOff: sab(Int32Array, 4, count + 1),
-    pts: sab(Float32Array, 4, (nEdge + edges.size) * 4),
-    arrow,
-    ramp,
-    ramps,
-  };
+  const count = nEdge + n;
 
   // The event a node is first reached at. An edge runs between laid-out node
   // positions (which in tree/DAG mode never move), and a ghost lives until exactly
@@ -362,57 +358,96 @@ export function buildGraphStore({
     if (!firstOf.has(id)) firstOf.set(id, i);
   }
 
-  let b = 0;
-  let pt = 0;
-  const arrowPacked = ARROW_TRIANGLE << 4; // end only; start = none
-  // Ramp id per pre-node body, so a recolour can restore what a body *was* without
-  // re-deriving the edges. 0 marks a ghost.
-  const preRamp: number[] = [];
+  const alloc = (n: number, points: number): SharedComponentStore => ({
+    generation,
+    count: n,
+    total,
+    kind: sab(Uint8Array, 1, n),
+    x: sab(Float32Array, 4, n),
+    y: sab(Float32Array, 4, n),
+    size: sab(Float32Array, 4, n),
+    size2: sab(Float32Array, 4, n),
+    alpha: sab(Float32Array, 4, n),
+    start: sab(Int32Array, 4, n),
+    end: sab(Int32Array, 4, n),
+    fill: sab(Int32Array, 4, n),
+    palette,
+    label: sab(Int32Array, 4, n),
+    strings: [""],
+    ptOff: sab(Int32Array, 4, n + 1),
+    pts: sab(Float32Array, 4, points * 4),
+    arrow: sab(Uint8Array, 1, n),
+    ramp: sab(Uint8Array, 1, n),
+    ramps,
+  });
 
-  const edge = (from: number, to: number, width: number, start: number, end: number) => {
-    store.kind[b] = KIND_PATH;
-    store.pts[pt] = px[from]!;
-    store.pts[pt + 1] = py[from]!;
-    store.pts[pt + 2] = px[to]!;
-    store.pts[pt + 3] = py[to]!;
-    pt += 4;
-    store.ptOff[b + 1] = pt / 2;
-    store.size[b] = width;
-    store.size2[b] = 8; // arrowhead size, in screen pixels
-    arrow[b] = arrowPacked;
-    store.alpha[b] = 1;
-    store.start[b] = start;
-    store.end[b] = end;
+  const arrowPacked = ARROW_TRIANGLE << 4; // end only; start = none
+
+  /** Write a 2-point path from node `from` to node `to` into `s` at body `b`. */
+  const edge = (
+    s: SharedComponentStore,
+    b: number,
+    pt: number,
+    from: number,
+    to: number,
+    width: number,
+    start: number,
+    end: number,
+  ) => {
+    s.kind[b] = KIND_PATH;
+    s.pts[pt] = px[from]!;
+    s.pts[pt + 1] = py[from]!;
+    s.pts[pt + 2] = px[to]!;
+    s.pts[pt + 3] = py[to]!;
+    s.ptOff[b + 1] = (pt + 4) / 2;
+    s.size[b] = width;
+    s.size2[b] = 8; // arrowhead size, in screen pixels
+    s.arrow![b] = arrowPacked;
+    s.alpha[b] = 1;
+    s.start[b] = start;
+    s.end[b] = end;
+    s.fill[b] = ghostFill;
   };
 
-  if (ghosts) {
-    // Ghost edges, then ghost nodes: the same stacking as the real thing.
+  // ---- The ghost layer.
+  let ghost: SharedComponentStore | undefined;
+  if (mode !== "plot" && (edges.size || firstOf.size)) {
+    ghost = alloc(edges.size + firstOf.size, edges.size);
+    let g = 0;
+    let gpt = 0;
     for (const e of edges.values()) {
       const a = firstOf.get(e.from);
       const c = firstOf.get(e.to);
       if (a === undefined || c === undefined) continue;
-      edge(a, c, 1, 0, e.at);
-      store.alpha[b] = GHOST_ALPHA;
-      store.fill[b] = ghostFill;
-      preRamp[b] = 0;
-      b++;
+      edge(ghost, g, gpt, a, c, 1, 0, e.at);
+      gpt += 4;
+      g++;
     }
     for (const i of firstOf.values()) {
-      store.kind[b] = KIND_CIRCLE;
-      store.x[b] = px[i]!;
-      store.y[b] = py[i]!;
-      // Smaller and fainter than the real thing. A ghost is scaffolding — it should
-      // read as *behind* the search, not compete with it for attention.
-      store.size[b] = 1.4 * NODE_SCALE;
-      store.alpha[b] = GHOST_ALPHA;
-      store.start[b] = 0;
-      store.end[b] = i; // gives way exactly as the node is first reached
-      store.fill[b] = ghostFill;
-      store.ptOff[b + 1] = pt / 2;
-      preRamp[b] = 0;
-      b++;
+      ghost.kind[g] = KIND_CIRCLE;
+      ghost.x[g] = px[i]!;
+      ghost.y[g] = py[i]!;
+      // Smaller than the real thing: a ghost is scaffolding, and should read as
+      // behind the search rather than competing with it.
+      ghost.size[g] = 1.4 * NODE_SCALE;
+      ghost.alpha[g] = 1; // the layer's alpha does the fading
+      ghost.start[g] = 0;
+      ghost.end[g] = i; // gives way exactly as the node is first reached
+      ghost.fill[g] = ghostFill;
+      ghost.ptOff[g + 1] = gpt / 2;
+      g++;
     }
+    ghost.count = g;
   }
+
+  // ---- The graph itself.
+  const store = alloc(count, nEdge);
+  const ramp = store.ramp!;
+
+  let b = 0;
+  let pt = 0;
+  /** Ramp id per pre-node body, so a recolour can restore an edge's child colour. */
+  const preRamp: number[] = [];
 
   for (let k = 0; k < edgeEvents.length; k++) {
     const i = edgeEvents[k]!;
@@ -423,7 +458,8 @@ export function buildGraphStore({
     // The child's span, exactly — so this body is showing precisely while the
     // child's is, and the next one takes over on the next visit.
     // Line width in world units; the layer clamps it into a pixel range.
-    edge(a, c, 1 + Math.log(edgeVisits[k]!), i, until[i]!);
+    edge(store, b, pt, a, c, 1 + Math.log(edgeVisits[k]!), i, until[i]!);
+    pt += 4;
     // And the child's ramp. Same span + same ramp => same bucket => same colour,
     // for free, at every step.
     const r = rampOf.get(String(ev.type ?? "")) ?? 0;
@@ -432,10 +468,8 @@ export function buildGraphStore({
     preRamp[b] = r;
     b++;
   }
-  // `b` may now trail the reserved slots: an edge whose endpoints never resolved was
-  // skipped. `store.count` is set from `b` at the end, so they are never read. Node
-  // bodies start here, which is what makes a clicked body index invertible back to
-  // an event (see `eventOf`).
+  // Node bodies start here, which is what makes a clicked body index invertible
+  // back to an event (see `eventOf`).
   const nodeOffset = b;
 
   const visits = new Map<string, number>();
@@ -484,6 +518,7 @@ export function buildGraphStore({
   store.count = b;
   return {
     store,
+    ghost,
     mode,
     scales,
     nodeOffset,
@@ -500,8 +535,8 @@ const num = (v: unknown): number => {
 function axisOf(events: TraceEvent[], property: string, log: boolean): AxisScale {
   let min = Infinity;
   let max = -Infinity;
-  for (const e of events) {
-    const v = num(e[property]);
+  for (let i = 0; i < events.length; i++) {
+    const v = metric(events[i]!, i, property);
     if (v < min) min = v;
     if (v > max) max = v;
   }

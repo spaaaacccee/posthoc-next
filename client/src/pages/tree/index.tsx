@@ -121,7 +121,6 @@ export function TreePage({ template: Page }: PageContentProps) {
     colors,
     background,
     edgeColor,
-    ghostColor,
     highlight,
     trackedProperty: trackedProperty || undefined,
   });
