@@ -115,7 +115,7 @@ export function GraphRenderer({
   // separately below, and neither repacks a column or rebuilds the index.
   useEffect(() => {
     if (!renderer || !graph?.store.count) return;
-    const h = renderer.load(graph.store, graphLayerParams(labelColor));
+    const h = renderer.load(graph.store, graphLayerParams(labelColor, graph.mode));
     handle.current = h;
     renderer.setStep(stepRef.current);
     return () => {
@@ -145,12 +145,17 @@ export function GraphRenderer({
     return () => void renderer.off("clickBody", f);
   }, [renderer, onClickBody]);
 
+  // Fit when the layer becomes drawable — not on a timer.
+  //
+  // `load()` returns long before the layer has any bounds: the Flatbush is packed in
+  // a worker, and `fitCamera` reads *that* for the extent. Firing on a fixed delay
+  // is a race the big traces lose, and losing it silently leaves the graph parked
+  // off-screen until the user hits Fit.
   useEffect(() => {
     if (!renderer || !graph?.store.count) return;
-    // After the store lands, not with it: the index is packed in a worker and the
-    // layer has no bounds to fit until it arrives.
-    const t = setTimeout(() => renderer.fitCamera(), 150);
-    return () => clearTimeout(t);
+    const f = () => renderer.fitCamera();
+    renderer.on("layerIndexed", f);
+    return () => void renderer.off("layerIndexed", f);
   }, [renderer, graph, fitKey]);
 
   return <div ref={setRef} style={{ width, height, background, overflow: "hidden" }} />;

@@ -32,14 +32,22 @@ const SEQUENTIAL = [
 export type ShadeGraphStoreOptions = {
   /** The graph this shading is for. Read-only: only `count` is consulted. */
   geometry: Pick<SharedComponentStore, "count">;
-  /** Bodies packed before the nodes; node body `i` is event `i - edgeCount`. */
-  edgeCount: number;
+  /** Bodies packed before the nodes; node body `i` is event `i - nodeOffset`. */
+  nodeOffset: number;
+  /**
+   * Ramp id per pre-node body, from the build (0 = ghost). Reused rather than
+   * re-derived: an edge's colour comes from its child's event type, and rebuilding
+   * the edge set here just to recover that would be a second O(n) pass over the
+   * trace for information we already had.
+   */
+  preRamp: Uint8Array;
   events?: TraceEvent[];
 
   /** Event type -> CSS colour. */
   colors: Record<string, string>;
   background: string;
   edgeColor: string;
+  ghostColor: string;
   fadeWindow?: number;
 
   /**
@@ -74,11 +82,13 @@ const num = (v: unknown): number => {
 
 export function shadeGraphStore({
   geometry,
-  edgeCount,
+  nodeOffset,
+  preRamp,
   events = [],
   colors,
   background,
   edgeColor,
+  ghostColor,
   fadeWindow = 400,
   highlight,
   highlightColor = "#00bcd4",
@@ -92,14 +102,33 @@ export function shadeGraphStore({
   const ramps: ColorRamp[] = [];
 
   const edgeFill = palette.push(edgeColor) - 1;
+  const ghostFill = palette.push(ghostColor) - 1;
 
   // A focused view or a property scale replaces the recency ramp rather than
   // layering on top of it. Two colour signals on one node is unreadable, and the
   // user asked a different question.
   const flat = !!highlight?.length || !!trackedProperty;
 
+  // Ghosts and edges are the same in every mode: a ghost stays a ghost, and an edge
+  // keeps the ramp its child node gave it at build time.
+  const restorePre = () => {
+    for (let b = 0; b < nodeOffset; b++) {
+      const r = preRamp[b] ?? 0;
+      if (r) {
+        ramp[b] = r;
+        fill[b] = edgeFill;
+      } else {
+        fill[b] = ghostFill;
+      }
+    }
+  };
+
   if (!flat) {
     // Default: one ramp per event type, fading towards the background.
+    //
+    // The ramp *ids* must line up with the build's, since `preRamp` carries them
+    // across. Both derive from `new Set(events.map(type))` over the same events, so
+    // insertion order — and therefore the ids — are identical.
     const rampOf = new Map<string, number>();
     for (const type of new Set(events.map((e) => String(e.type ?? "")))) {
       const fade = interpolate([colors[type] ?? colors[""] ?? "#888888", background]);
@@ -110,13 +139,9 @@ export function shadeGraphStore({
       ramps.push({ offset, length: RAMP_STEPS, window: fadeWindow });
       rampOf.set(type, ramps.length);
     }
-    for (let b = 0; b < count; b++) {
-      if (b < edgeCount) {
-        fill[b] = edgeFill;
-        continue;
-      }
-      const e = events[b - edgeCount];
-      ramp[b] = rampOf.get(String(e?.type ?? "")) ?? 0;
+    restorePre();
+    for (let b = nodeOffset; b < count; b++) {
+      ramp[b] = rampOf.get(String(events[b - nodeOffset]?.type ?? "")) ?? 0;
     }
     return { fill, ramp, palette, ramps, generation };
   }
@@ -128,10 +153,10 @@ export function shadeGraphStore({
     const dim = palette.push(interpolate([colors[""] ?? "#888888", background])(0.85)) - 1;
     const hot = palette.push(highlightColor) - 1;
     fill.fill(dim);
-    for (let b = 0; b < edgeCount; b++) fill[b] = edgeFill;
+    for (let b = 0; b < nodeOffset; b++) fill[b] = ghostFill;
     for (const step of highlight) {
-      const b = edgeCount + step;
-      if (b >= edgeCount && b < count) fill[b] = hot;
+      const b = nodeOffset + step;
+      if (b < count) fill[b] = hot;
     }
     return { fill, ramp, palette, ramps, generation };
   }
@@ -155,13 +180,9 @@ export function shadeGraphStore({
     max = 1;
   }
 
-  for (let b = 0; b < count; b++) {
-    if (b < edgeCount) {
-      fill[b] = edgeFill;
-      continue;
-    }
-    const e = events[b - edgeCount];
-    const t = (num(e?.[trackedProperty!]) - min) / (max - min);
+  restorePre();
+  for (let b = nodeOffset; b < count; b++) {
+    const t = (num(events[b - nodeOffset]?.[trackedProperty!]) - min) / (max - min);
     const k = Math.min(BUCKETS - 1, Math.max(0, Math.floor(t * BUCKETS)));
     fill[b] = offset + k;
   }

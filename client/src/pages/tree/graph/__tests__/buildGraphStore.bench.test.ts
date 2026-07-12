@@ -48,7 +48,7 @@ suite("scale: 717k events, plot mode", () => {
         colors: { generating: "#2196f3", source: "#4caf50", destination: "#f44336" },
         background: "#ffffff",
         edgeColor: "#cccccc",
-        labelColor: "#000000",
+        ghostColor: "#eeeeee",
       });
     });
     const { store } = result;
@@ -88,7 +88,7 @@ suite("scale: 717k events, plot mode", () => {
     // through the same `pxSize` the renderer uses — including the layer's clamp,
     // which is the thing that decides whether the splat path engages at all.
     const tileScale = 512 / (tiles[0]!.bounds.right - tiles[0]!.bounds.left);
-    const sizing = graphLayerParams("#000").sizing!.circle;
+    const sizing = graphLayerParams("#000", "plot").sizing!.circle;
     const nodeRadiusPx = pxSize(2, tileScale, sizing);
 
     console.log(
@@ -132,7 +132,7 @@ suite("scale: 717k events, plot mode", () => {
       colors: {},
       background: "#ffffff",
       edgeColor: "#ccc",
-      labelColor: "#000",
+      ghostColor: "#eee",
     });
     const { store } = result;
     const fb = openIndex(buildIndex(store)!);
@@ -184,7 +184,7 @@ suite("scale: 717k events, plot mode", () => {
       colors: {},
       background: "#ffffff",
       edgeColor: "#ccc",
-      labelColor: "#000",
+      ghostColor: "#eee",
     });
     const { store } = result;
     const fb = openIndex(buildIndex(store)!);

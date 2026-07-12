@@ -120,6 +120,16 @@ export type D2RendererEvents = RendererEvents & {
    * back.
    */
   clickBody: (e: Event, hit: { world: Point; bodies: D2BodyHit[] }) => void;
+
+  /**
+   * A layer's spatial index has landed and it is now drawable.
+   *
+   * Packing the index is O(n log n) and happens in a worker, so `load()` returns
+   * long before the layer has any bounds. Anything that needs those bounds —
+   * `fitCamera` above all — must wait for this rather than guess at a delay: on a
+   * large trace the guess loses, and the camera fits an empty renderer.
+   */
+  layerIndexed: (handle: SourceHandle) => void;
 };
 
 export type D2RendererInterface = Renderer<

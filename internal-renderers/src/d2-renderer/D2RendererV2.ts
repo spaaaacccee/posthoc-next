@@ -209,6 +209,11 @@ export class D2RendererV2 extends D2RendererBase {
     if (!hit) {
       this.#pendingIndex.set(id, store);
       this.#workers[0]?.call("buildLayerIndex", [id]);
+    } else {
+      // Cached index: drawable already. Announce it anyway (asynchronously, so a
+      // listener registered right after `load()` still hears it), or a remount
+      // against a cached store would wait forever for a fit that never comes.
+      queueMicrotask(() => this.emit("layerIndexed", id));
     }
     this.#clearResolved();
     // Push the current frustum + step so freshly-loaded workers render the
@@ -238,6 +243,8 @@ export class D2RendererV2 extends D2RendererBase {
     this.#workers.forEach((w) => w.call("setLayerIndex", [handle, index]));
     this.#clearResolved();
     this.handleFrustumChange();
+    // The layer only now has bounds. `fitCamera` before this point fits nothing.
+    this.emit("layerIndexed", handle);
   }
 
   #clearResolved() {

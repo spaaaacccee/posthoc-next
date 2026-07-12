@@ -47,6 +47,21 @@ const RAMP_STEPS = 16;
 /** How faded a body is once its ramp saturates. 0 = the background exactly. */
 const FLOOR = 0.25;
 
+/**
+ * World radius per unit of `2 + log(visits)`.
+ *
+ * Radii are world-space, so they have to be expressed in the *layout's* units or
+ * they render at the wrong scale — and dagre's units are set by its own
+ * `nodesep`/`ranksep` (~50 and 100), not by anything here. A bare radius of 2
+ * against a 50-unit node gap is a speck: fitted to the viewport it lands under a
+ * pixel and clamps to the floor, which is exactly the "nodes are way too small"
+ * failure. Sigma never hit this because its sizes were screen-space.
+ */
+const NODE_SCALE = 10;
+
+/** Opacity of the un-searched tree. Enough to read the shape, not enough to shout. */
+const GHOST_ALPHA = 0.4;
+
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
 /** A node's laid-out position, from dagre. Keyed by `String(event.id)`. */
@@ -68,6 +83,8 @@ export type BuildGraphStoreOptions = {
   /** What a faded body tends towards; the viewport background. */
   background: string;
   edgeColor: string;
+  /** The un-searched tree, drawn before the playhead reaches it. */
+  ghostColor: string;
   /** Steps a body takes to fade out. Sigma's equivalent was 400. */
   fadeWindow?: number;
   generation?: number;
@@ -91,22 +108,31 @@ export type AxisScale = {
 
 export type GraphStoreResult = {
   store: SharedComponentStore;
+  /** The mode it was built for. The layer's sizing policy depends on it. */
+  mode: GraphMode;
   /** Plot mode only. */
   scales?: { x: AxisScale; y: AxisScale };
   /** Content bounds in world space, for fitting the camera. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   /**
-   * Bodies packed ahead of the nodes. Node body `i` is event `i - edgeCount`, and
-   * that identity is the entire hit-test: the renderer reports a clicked *body
-   * index*, and this maps it straight back to the event the user clicked, with no
-   * second index and no lookup table.
+   * Bodies packed ahead of the nodes — the ghosts and the edges. Node body `i` is
+   * event `i - nodeOffset`, and that identity is the entire hit-test: the renderer
+   * reports a clicked *body index*, and this maps it straight back to the event the
+   * user clicked, with no second index and no lookup table.
    */
-  edgeCount: number;
+  nodeOffset: number;
+  /**
+   * Ramp id per pre-node body. An edge takes its child node's event type — that is
+   * what makes edges read as belonging to the node they point at rather than as
+   * neutral scaffolding — and a recolour has to put that back without re-deriving
+   * the edges. 0 marks a ghost.
+   */
+  preRamp: Uint8Array;
 };
 
-/** The event a clicked body refers to, or `undefined` if an edge was clicked. */
+/** The event a clicked body refers to; `undefined` for a ghost or an edge. */
 export const eventOf = (r: GraphStoreResult, body: number): number | undefined =>
-  body >= r.edgeCount ? body - r.edgeCount : undefined;
+  body >= r.nodeOffset ? body - r.nodeOffset : undefined;
 
 /** symlog: linear near zero, logarithmic beyond it. Matches d3's scaleSymlog. */
 const symlog = (v: number) => Math.sign(v) * Math.log1p(Math.abs(v));
@@ -145,6 +171,7 @@ export function buildGraphStore({
   colors,
   background,
   edgeColor,
+  ghostColor,
   fadeWindow = 400,
   generation = 0,
 }: BuildGraphStoreOptions): GraphStoreResult {
@@ -173,6 +200,10 @@ export function buildGraphStore({
     rampOf.set(type, ramps.length);
   }
   const edgeFill = palette.push(edgeColor) - 1;
+  // The un-searched tree: visible from step 0, so the shape of the whole search is
+  // there before the playhead reaches it.
+  const ghostFill = palette.push(ghostColor) - 1;
+  const uniqueIds = new Set(events.map((e) => String(e.id)));
 
   // ---- Positions.
   //
@@ -200,8 +231,12 @@ export function buildGraphStore({
       const l = nodes.get(String(e.id));
       // Rotation swaps the axes on the *positions*, not in dagre — the layout is
       // cached across orientation changes, so rotating must not re-run it.
+      //
+      // The y negation matters: dagre puts the root at y=0 and grows downward, and
+      // sigma rendered y-*up*, so the tree came out root-at-bottom. Canvas is y-down,
+      // so reproducing what the view used to look like means flipping it back.
       px[i] = l ? (horizontal ? -l.y : l.x) : 0;
-      py[i] = l ? (horizontal ? l.x : l.y) : 0;
+      py[i] = l ? (horizontal ? -l.x : -l.y) : 0;
     }
   }
 
@@ -230,11 +265,27 @@ export function buildGraphStore({
     }
   }
 
-  // ---- Edges. One body per distinct (id -> pId), first appearance onward.
-  // `size` accumulates a visit count, so a heavily-traversed edge draws thicker —
-  // the same signal sigma got by bumping the edge's size attribute per event.
-  type Edge = { from: string; to: string; at: number; visits: number; ramp: number };
+  // ---- Edges.
+  //
+  // **One edge body per child event, not per edge.** An edge body carries a single
+  // `start`, and its ramp resolves against that — so an edge packed once, at the
+  // moment it was created, would freeze at the colour its child had *then*. Revisit
+  // the child and it re-brightens while its edge stays stale: node and edge drift
+  // apart, which is wrong, because an edge belongs to the node it points at.
+  //
+  // Giving the edge the *same span and the same ramp* as its child's current body
+  // makes them resolve to the same colour by construction rather than by
+  // coincidence. The spans tile exactly, so only one edge body per edge is ever
+  // visible — the renderer still draws one line.
+  //
+  // `edges` (one entry per distinct edge) survives only to build the ghosts and to
+  // count traversals.
+  type Edge = { from: string; to: string; at: number; visits: number };
   const edges = new Map<string, Edge>();
+  /** Event indices that get an edge body, in order. */
+  const edgeEvents: number[] = [];
+  const edgeVisits: number[] = [];
+
   if (mode !== "plot") {
     // A tree keeps only each node's *final* parent, so a re-parented node has one
     // edge; a directed graph keeps every parent it ever had.
@@ -252,25 +303,28 @@ export function buildGraphStore({
       if (mode === "tree" && finalParent.get(id) !== pId) continue;
       const key = `${id}::${pId}`;
       const existing = edges.get(key);
-      if (existing) existing.visits++;
-      else {
-        edges.set(key, {
-          from: id,
-          to: pId,
-          at: i,
-          visits: 1,
-          ramp: rampOf.get(String(e.type ?? "")) ?? 0,
-        });
-      }
+      const visits = (existing?.visits ?? 0) + 1;
+      if (existing) existing.visits = visits;
+      else edges.set(key, { from: id, to: pId, at: i, visits: 1 });
+      edgeEvents.push(i);
+      edgeVisits.push(visits);
     }
   }
 
-  // ---- Pack. Edges first, then nodes: `queryVisible` returns indices ascending,
-  // so body order *is* draw order, and edges must sit under nodes. Labels are
-  // inline on the node body, so they need no bodies of their own and are painted
-  // last within each node's draw.
-  const nEdge = edges.size;
-  const count = nEdge + n;
+  // ---- Pack, in draw order. `queryVisible` returns indices ascending, so body
+  // order *is* draw order, and the layers stack: ghosts, then edges, then nodes.
+  //
+  // The **ghosts** are the faint outline of the whole tree, drawn before the search
+  // reaches it. Each unique node and each edge gets one extra body spanning
+  // `[0, firstStep)` — so it is showing exactly while the real body is not, and the
+  // two are disjoint. That gives the structure of the search up front and costs one
+  // body per node rather than one per event.
+  //
+  // Plot mode has no ghosts: a scatter point's position comes from its own event, so
+  // there is nothing to draw before that event exists.
+  const ghosts = mode === "plot" ? 0 : uniqueIds.size + edges.size;
+  const nEdge = edgeEvents.length;
+  const count = ghosts + nEdge + n;
   // Held locally as well as on the store: they are optional on
   // `SharedComponentStore` (a map layer has neither), but this function always
   // writes them, and the narrow local types save an assertion on every access.
@@ -293,47 +347,96 @@ export function buildGraphStore({
     label: sab(Int32Array, 4, count),
     strings: [""],
     ptOff: sab(Int32Array, 4, count + 1),
-    pts: sab(Float32Array, 4, nEdge * 4),
+    pts: sab(Float32Array, 4, (nEdge + edges.size) * 4),
     arrow,
     ramp,
     ramps,
   };
 
-  // Positions of a node's *first* body: an edge is drawn between laid-out node
-  // positions, which in tree/DAG mode never move.
+  // The event a node is first reached at. An edge runs between laid-out node
+  // positions (which in tree/DAG mode never move), and a ghost lives until exactly
+  // this step. Built forwards, so iteration order is discovery order.
   const firstOf = new Map<string, number>();
-  for (let i = n - 1; i >= 0; i--) firstOf.set(String(events[i]!.id), i);
+  for (let i = 0; i < n; i++) {
+    const id = String(events[i]!.id);
+    if (!firstOf.has(id)) firstOf.set(id, i);
+  }
 
   let b = 0;
   let pt = 0;
   const arrowPacked = ARROW_TRIANGLE << 4; // end only; start = none
-  for (const e of edges.values()) {
-    const a = firstOf.get(e.from);
-    const c = firstOf.get(e.to);
-    if (a === undefined || c === undefined) continue;
+  // Ramp id per pre-node body, so a recolour can restore what a body *was* without
+  // re-deriving the edges. 0 marks a ghost.
+  const preRamp: number[] = [];
+
+  const edge = (from: number, to: number, width: number, start: number, end: number) => {
     store.kind[b] = KIND_PATH;
-    store.pts[pt] = px[a]!;
-    store.pts[pt + 1] = py[a]!;
-    store.pts[pt + 2] = px[c]!;
-    store.pts[pt + 3] = py[c]!;
+    store.pts[pt] = px[from]!;
+    store.pts[pt + 1] = py[from]!;
+    store.pts[pt + 2] = px[to]!;
+    store.pts[pt + 3] = py[to]!;
     pt += 4;
     store.ptOff[b + 1] = pt / 2;
-    // Line width in world units; the layer clamps it into a pixel range.
-    store.size[b] = 1 + Math.log(e.visits);
+    store.size[b] = width;
     store.size2[b] = 8; // arrowhead size, in screen pixels
     arrow[b] = arrowPacked;
     store.alpha[b] = 1;
-    store.start[b] = e.at;
-    store.end[b] = total;
+    store.start[b] = start;
+    store.end[b] = end;
+  };
+
+  if (ghosts) {
+    // Ghost edges, then ghost nodes: the same stacking as the real thing.
+    for (const e of edges.values()) {
+      const a = firstOf.get(e.from);
+      const c = firstOf.get(e.to);
+      if (a === undefined || c === undefined) continue;
+      edge(a, c, 1, 0, e.at);
+      store.alpha[b] = GHOST_ALPHA;
+      store.fill[b] = ghostFill;
+      preRamp[b] = 0;
+      b++;
+    }
+    for (const i of firstOf.values()) {
+      store.kind[b] = KIND_CIRCLE;
+      store.x[b] = px[i]!;
+      store.y[b] = py[i]!;
+      // Smaller and fainter than the real thing. A ghost is scaffolding — it should
+      // read as *behind* the search, not compete with it for attention.
+      store.size[b] = 1.4 * NODE_SCALE;
+      store.alpha[b] = GHOST_ALPHA;
+      store.start[b] = 0;
+      store.end[b] = i; // gives way exactly as the node is first reached
+      store.fill[b] = ghostFill;
+      store.ptOff[b + 1] = pt / 2;
+      preRamp[b] = 0;
+      b++;
+    }
+  }
+
+  for (let k = 0; k < edgeEvents.length; k++) {
+    const i = edgeEvents[k]!;
+    const ev = events[i]!;
+    const a = firstOf.get(String(ev.id));
+    const c = firstOf.get(String(ev.pId));
+    if (a === undefined || c === undefined) continue;
+    // The child's span, exactly — so this body is showing precisely while the
+    // child's is, and the next one takes over on the next visit.
+    // Line width in world units; the layer clamps it into a pixel range.
+    edge(a, c, 1 + Math.log(edgeVisits[k]!), i, until[i]!);
+    // And the child's ramp. Same span + same ramp => same bucket => same colour,
+    // for free, at every step.
+    const r = rampOf.get(String(ev.type ?? "")) ?? 0;
     store.fill[b] = edgeFill;
-    ramp[b] = e.ramp;
+    ramp[b] = r;
+    preRamp[b] = r;
     b++;
   }
-  // `b` may now trail `nEdge`: an edge whose endpoints never resolved was skipped,
-  // leaving unused trailing slots. `store.count` is set from `b` at the end, so
-  // they are never read. Node bodies start here, which is what makes a clicked
-  // body index invertible back to an event (see `eventOf`).
-  const edgeCount = b;
+  // `b` may now trail the reserved slots: an edge whose endpoints never resolved was
+  // skipped. `store.count` is set from `b` at the end, so they are never read. Node
+  // bodies start here, which is what makes a clicked body index invertible back to
+  // an event (see `eventOf`).
+  const nodeOffset = b;
 
   const visits = new Map<string, number>();
   const strings = store.strings;
@@ -361,7 +464,7 @@ export function buildGraphStore({
     store.y[b] = Y;
     // Doubles as the label grid's importance, so a much-visited node keeps its
     // label when a quiet neighbour loses it.
-    store.size[b] = 2 + Math.log(v);
+    store.size[b] = (2 + Math.log(v)) * NODE_SCALE;
     store.alpha[b] = 1;
     store.start[b] = i;
     store.end[b] = until[i]!;
@@ -381,8 +484,10 @@ export function buildGraphStore({
   store.count = b;
   return {
     store,
+    mode,
     scales,
-    edgeCount,
+    nodeOffset,
+    preRamp: Uint8Array.from(preRamp.slice(0, nodeOffset)),
     bounds: n ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: PLOT_SPAN, maxY: PLOT_SPAN },
   };
 }
@@ -416,19 +521,24 @@ function axisOf(events: TraceEvent[], property: string, log: boolean): AxisScale
  * sliders, and dragging one re-rasterizes but never repacks a column or rebuilds
  * the spatial index.
  */
-export const graphLayerParams = (labelColor: string): LayerParams => ({
+export const graphLayerParams = (labelColor: string, mode: GraphMode): LayerParams => ({
   sizing: {
     // World-space, so nodes spread apart as you zoom in — but clamped, because a
     // node that keeps growing becomes a blob and one that keeps shrinking
     // vanishes.
     //
-    // The floor is exactly 1, and that is load-bearing rather than a round number:
-    // `drawBody` splats a single pixel when a circle's radius is <= 1px, and that
-    // splat is what stops fill rate scaling with node count. A floor of 1.5 would
-    // keep every node just above the threshold, so a fully zoomed-out million-node
-    // graph would stroke a million ellipses — the LOD path would exist and never
-    // once run.
-    circle: { min: 1, max: 20 },
+    // The floor differs by mode, and both values are load-bearing.
+    //
+    // A **plot** floors at 1. `drawBody` splats a rect rather than stroking an
+    // ellipse at or below 2px, and that splat is what stops fill rate scaling with
+    // node count — a fitted 717k-point scatter draws every node through it. Floor it
+    // higher and the LOD path exists but never runs.
+    //
+    // A **tree** floors at 3, because it has one node per *unique id* (25k on the
+    // same trace, not 717k), so ellipses are affordable and legibility wins: at 1px
+    // a fitted tree is a smear of dots, which is exactly what "nodes are way too
+    // small" looked like.
+    circle: mode === "plot" ? { min: 1, max: 20 } : { min: 3, max: 24 },
     path: { min: 1, max: 6 },
   },
   label: {
