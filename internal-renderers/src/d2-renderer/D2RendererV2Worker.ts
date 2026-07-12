@@ -2,15 +2,11 @@ import { isEqual } from "es-toolkit";
 import { once, throttle } from "es-toolkit/compat";
 import type { Bounds, Point, Size } from "protocol";
 import type { LayerParams, SharedComponentStore } from "renderer";
+import { shadeOf } from "renderer";
 import type Flatbush from "flatbush";
-import { columnarDrawTransform, drawBody } from "./columnarDraw";
-import {
-  isStepInvariant,
-  openIndex,
-  packIndex,
-  QueryScratch,
-  queryVisible,
-} from "./columnarIndex";
+import type { DrawOptions } from "./columnarDraw";
+import { buildLabelGrid, columnarDrawTransform, drawBody, screenPad } from "./columnarDraw";
+import { isStepInvariant, openIndex, packIndex, QueryScratch, queryVisible } from "./columnarIndex";
 import { D2RendererEvents, D2RendererOptions, defaultD2RendererOptions } from "./D2RendererOptions";
 import { getTiles } from "./D2RendererWorker";
 import { EventEmitter } from "./EventEmitter";
@@ -253,15 +249,26 @@ export class D2RendererV2Worker extends EventEmitter<
   }
 
   /**
-   * Update a layer's compositing params (order/alpha/displayMode) — no rebuild.
-   * Note this deliberately does *not* drop `layer.tiles`: alpha and blend mode are
-   * applied when the layer is composited onto the tile, so its own raster is
-   * unchanged. Dragging an opacity slider re-composites from cache.
+   * Update a layer's compositing params — no rebuild, no repack of the store.
+   *
+   * Order, alpha and blend mode are applied when the layer is *composited* onto
+   * the tile, so its own raster survives them: dragging an opacity slider
+   * re-composites from `layer.tiles`. `sizing` and `label` are different — they
+   * change the pixels the layer rasterizes to — so they have to drop that cache,
+   * or a node-size slider would move nothing on an invariant layer.
+   *
+   * Both are still cheap relative to the alternative, which is why these knobs
+   * live here and not in the store: a size or label change re-rasterizes, but it
+   * never repacks columns or rebuilds the spatial index.
    */
   setLayerParams(handle: string, params: LayerParams) {
     const layer = this.#layers.get(handle);
     if (!layer) return;
+    const raster =
+      ("sizing" in params && !isEqual(params.sizing, layer.params.sizing)) ||
+      ("label" in params && !isEqual(params.label, layer.params.label));
     layer.params = { ...layer.params, ...params };
+    if (raster) layer.tiles.clear();
     this.#dirty();
     this.#invalidate();
   }
@@ -376,6 +383,11 @@ export class D2RendererV2Worker extends EventEmitter<
     const { top, right, bottom, left } = bounds;
     const key = tileKey(bounds);
 
+    // Hoisted above the query: a screen-space or pixel-clamped body's *world*
+    // footprint depends on the zoom, so the query has to know the scale before it
+    // can decide how far past the tile to look. See `screenPad`.
+    const t = columnarDrawTransform(bounds, tile);
+
     // Per layer: either a cached raster (step-invariant layers only — a map's
     // pixels in this tile don't depend on the playhead) or the visible bodies to
     // draw, plus that layer's own content hash.
@@ -394,24 +406,54 @@ export class D2RendererV2Worker extends EventEmitter<
         // the rasterization — the whole layer, for the cost of one drawImage.
         return { l, cached, hash: cached.hash };
       }
-      const indices = queryVisible(l.store, l.fb!, { top, left, right, bottom }, this.#step, {
-        scratch: l.scratch,
-      });
+      const opts: DrawOptions = {
+        step: this.#step,
+        sizing: l.params.sizing,
+        label: l.params.label,
+      };
+      const pad = screenPad(l.store, t.sx, opts);
+      const indices = queryVisible(
+        l.store,
+        l.fb!,
+        { top: top - pad, left: left - pad, right: right + pad, bottom: bottom + pad },
+        this.#step,
+        { scratch: l.scratch },
+      );
       let h = 0x811c9dc5;
       const mix = (v: number) => {
         h = Math.imul(h ^ (v >>> 0), 0x01000193) >>> 0;
       };
       mix(l.generation);
       mix(indices.length);
-      for (const i of indices) mix(i);
+      if (l.store.ramps?.length) {
+        // Fold each ramped body's *bucket*, not the raw step. That distinction is
+        // the whole value of the ramp design: a tile whose ramped bodies have all
+        // saturated hashes identically at step 5,000 and step 50,000, so it stays
+        // cached — only tiles holding recently-touched bodies re-rasterize. Since
+        // a search frontier is spatially local, a scrub repaints a handful of
+        // tiles rather than every tile on screen (which is what sigma does).
+        //
+        // Mixing `this.#step` instead would be correct but would defeat the cache
+        // entirely for the whole layer, on every step.
+        for (const i of indices) {
+          mix(i);
+          mix(shadeOf(l.store, i, this.#step));
+        }
+      } else {
+        for (const i of indices) mix(i);
+      }
       // Cache the *miss* as well: an invariant layer with nothing in this tile
       // has nothing in it at any step, so there's no point re-querying it every
       // step just to find that out again. (Rasters for non-empty tiles are cached
       // in the draw loop below, where the canvas actually gets painted.)
       if (l.invariant && !indices.length) {
-        this.#touchLayerTile(l, layerKey, { hash: h >>> 0, width: tile.width, height: tile.height });
+        this.#touchLayerTile(l, layerKey, {
+          hash: h >>> 0,
+          width: tile.width,
+          height: tile.height,
+        });
       }
-      return { l, indices, hash: h >>> 0 };
+      return { l, indices, opts, hash: h >>> 0 };
     });
 
     // Combine into the tile's hash. The separator keeps distinct layer splits
@@ -433,7 +475,6 @@ export class D2RendererV2Worker extends EventEmitter<
     ctx.fillRect(0, 0, tile.width, tile.height);
     this.#drawNotch(ctx, tile);
 
-    const t = columnarDrawTransform(bounds, tile);
     // Layers with nothing in this tile don't affect the composite, so they don't
     // count against the fast path below — an empty overlay shouldn't force the
     // one layer that *does* have content through a sub-canvas.
@@ -450,6 +491,15 @@ export class D2RendererV2Worker extends EventEmitter<
         continue;
       }
       const indices = p.indices!;
+      const opts = p.opts!;
+      // Decide which labels survive before drawing any of them — the grid is a
+      // contest between bodies, so it can't be resolved one body at a time. Its
+      // inputs (the indices, the transform, the label params) are all already in
+      // the tile's hash, so it needs no cache key of its own.
+      if (opts.label?.grid) {
+        opts.labels = buildLabelGrid(l.store, indices, t, tile, opts.label);
+      }
+
       if (l.invariant && indices.length >= MIN_BODIES_TO_CACHE) {
         // Dense enough that rasterizing costs more than a blit: draw once into a
         // canvas we keep, then composite from it. Every later step in this tile
@@ -458,7 +508,7 @@ export class D2RendererV2Worker extends EventEmitter<
         const own = new OffscreenCanvas(tile.width, tile.height);
         const ownCtx = own.getContext("2d")!;
         ownCtx.imageSmoothingEnabled = false;
-        for (const i of indices) drawBody(l.store, i, ownCtx, t, l.colors);
+        for (const i of indices) drawBody(l.store, i, ownCtx, t, l.colors, opts);
         this.#touchLayerTile(l, layerKey, {
           hash: p.hash,
           canvas: own,
@@ -472,13 +522,13 @@ export class D2RendererV2Worker extends EventEmitter<
         // Sole layer, painted plainly: compositing it through a sub-canvas is a
         // no-op (source-over is associative), so draw straight onto the tile and
         // halve the fill rate.
-        for (const i of indices) drawBody(l.store, i, ctx, t, l.colors);
+        for (const i of indices) drawBody(l.store, i, ctx, t, l.colors, opts);
         continue;
       }
       // Otherwise the layer paints onto the shared sub-canvas, then composites
       // with its alpha + blend mode (matching v1's per-source-layer compositing).
       ctx2.clearRect(0, 0, tile.width, tile.height);
-      for (const i of indices) drawBody(l.store, i, ctx2, t, l.colors);
+      for (const i of indices) drawBody(l.store, i, ctx2, t, l.colors, opts);
       ctx.drawImage(g2, 0, 0);
     }
     ctx.globalAlpha = 1;

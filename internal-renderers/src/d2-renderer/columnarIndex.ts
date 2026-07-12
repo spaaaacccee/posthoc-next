@@ -174,15 +174,21 @@ export function openIndex(index: SharedArrayBuffer): Flatbush {
 }
 
 /**
- * True when every body is visible at every step, so this layer's contribution to
- * any tile is *step-invariant* — the same pixels at step 0 and step 10,000.
+ * True when every body is visible at every step *and* shades the same at every
+ * step, so this layer's contribution to any tile is **step-invariant** — the same
+ * pixels at step 0 and step 10,000.
  *
  * Map layers are exactly this (`buildStaticComponentStore` gives every body the
  * span `[0, STATIC_END)`), and they are the reason it's worth asking: without it,
  * a map's walls are re-rasterized into every tile on every step, purely because
  * the trace layer sharing that tile changed. O(count), once per layer.
+ *
+ * A colour ramp disqualifies a layer outright, and cheaply: a ramped body's
+ * *visibility* may well be step-independent while its *colour* is not, and
+ * caching its raster would freeze the fade.
  */
 export function isStepInvariant(store: SharedComponentStore): boolean {
+  if (store.ramps?.length) return false;
   for (let i = 0; i < store.count; i++) {
     if (store.start[i]! > 0 || store.end[i]! < store.total) return false;
   }

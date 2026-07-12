@@ -1,4 +1,5 @@
 import { CompiledComponent, ParsedComponent, Point } from "protocol";
+import type { ArrowShape } from "renderer";
 
 export type D2Base = {
   /// version < 1.4.0 compat
@@ -28,6 +29,19 @@ export type D2Path = D2Polygon & {
   lineWidth: number;
   /// version < 1.4.0 compat
   "line-width": number;
+  /**
+   * Arrowhead at the last vertex, e.g. `"triangle"`. Omit (or `"none"`) for a
+   * plain line. Only `none` and `triangle` are drawn today; the rest of
+   * {@link ArrowShape} is reserved.
+   */
+  arrowEnd?: ArrowShape;
+  /** Arrowhead at the first vertex. Use with `arrowEnd` for a bidirectional edge. */
+  arrowStart?: ArrowShape;
+  /**
+   * Arrowhead size, in **screen pixels** — an arrowhead that scaled with zoom
+   * would be a speck when zoomed out and a billboard when zoomed in. Default 8.
+   */
+  arrowSize?: number;
 };
 
 export type D2InstrinsicComponents = {
@@ -38,9 +52,9 @@ export type D2InstrinsicComponents = {
 };
 
 export type ParsedD2IntrinsicComponent<
-  T extends keyof D2InstrinsicComponents = keyof D2InstrinsicComponents
+  T extends keyof D2InstrinsicComponents = keyof D2InstrinsicComponents,
 > = ParsedComponent<T, D2InstrinsicComponents[T]>;
 
 export type CompiledD2IntrinsicComponent<
-  T extends keyof D2InstrinsicComponents = keyof D2InstrinsicComponents
+  T extends keyof D2InstrinsicComponents = keyof D2InstrinsicComponents,
 > = CompiledComponent<T, D2InstrinsicComponents[T]>;

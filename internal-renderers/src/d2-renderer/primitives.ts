@@ -18,8 +18,7 @@ export type Transform = Point & {
 export const getFillStyle = (fill: string, alpha: number) =>
   new ColorTranslator(fill).setA(alpha ?? defaultContext.alpha).RGBA;
 
-export const getStrokeStyle = (fill: string, alpha: number) =>
-  getFillStyle(fill, alpha);
+export const getStrokeStyle = (fill: string, alpha: number) => getFillStyle(fill, alpha);
 
 type Box = Size & Point;
 
@@ -33,11 +32,7 @@ function transform(a: Box, t: Transform): Box {
 }
 
 type Primitive<T extends keyof D2Components = keyof D2Components> = {
-  draw(
-    c: CompiledD2Component<T>,
-    g: OffscreenCanvasRenderingContext2D,
-    t: Transform
-  ): void;
+  draw(c: CompiledD2Component<T>, g: OffscreenCanvasRenderingContext2D, t: Transform): void;
   test(c: CompiledD2Component<T>): Bounds;
   narrow(c: CompiledD2Component<T>, p: Point): boolean;
 };
@@ -95,15 +90,7 @@ export const circle: Primitive<"circle"> = {
     g.fillStyle = getFillStyle(c.fill, c.alpha);
     g.beginPath();
     const box = transform({ ...c, width: c.radius, height: c.radius }, t);
-    g.ellipse(
-      ceil(box.x),
-      ceil(box.y),
-      ceil(box.width),
-      ceil(box.height),
-      0,
-      0,
-      2 * PI
-    );
+    g.ellipse(ceil(box.x), ceil(box.y), ceil(box.width), ceil(box.height), 0, 0, 2 * PI);
     g.fill();
   },
   test(c) {
@@ -156,7 +143,7 @@ export const path: Primitive<"path"> = {
     const { x, y, width } = transform(
       /// version < 1.4.0 compat
       { ...box, width: c["line-width"] ?? c.lineWidth, height: 0 },
-      t
+      t,
     );
     g.lineWidth = ceil(width);
     g.moveTo(ceil(x), ceil(y));
@@ -170,25 +157,22 @@ export const path: Primitive<"path"> = {
     /// version < 1.4.0 compat
     const w = c["line-width"] ?? c.lineWidth;
     return {
-      left: ((minBy(c.points, "x")?.x ?? 0) - w) - 1,
-      right: ((maxBy(c.points, "x")?.x ?? 0) + w) + 1,
-      top: ((minBy(c.points, "y")?.y ?? 0) - w) - 1,
-      bottom: ((maxBy(c.points, "y")?.y ?? 0) + w) + 1,
+      left: (minBy(c.points, "x")?.x ?? 0) - w - 1,
+      right: (maxBy(c.points, "x")?.x ?? 0) + w + 1,
+      top: (minBy(c.points, "y")?.y ?? 0) - w - 1,
+      bottom: (maxBy(c.points, "y")?.y ?? 0) + w + 1,
     };
   },
   narrow(c, p) {
     return (
       (c.points.length > 1
-        ? dist(
-            point([p.x, p.y]),
-            lineString(c.points.map(({ x, y }) => [x, y]))
-          )
+        ? dist(point([p.x, p.y]), lineString(c.points.map(({ x, y }) => [x, y])))
         : dist(
             point([p.x, p.y]),
             lineString([
               [head(c.points)?.x ?? 0, head(c.points)?.y ?? 0],
               [head(c.points)?.x ?? 0, head(c.points)?.y ?? 0],
-            ])
+            ]),
           )) <
       500 * c.lineWidth
     );

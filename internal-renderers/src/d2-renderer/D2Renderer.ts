@@ -8,10 +8,7 @@ import { ComponentEntry, makeRenderer } from "renderer";
 import { D2RendererBase } from "../d2-renderer-base/D2RendererBase";
 import { Bush } from "./Bush";
 import { CompiledD2IntrinsicComponent } from "./D2IntrinsicComponents";
-import {
-  D2RendererOptions,
-  defaultD2RendererOptions,
-} from "./D2RendererOptions";
+import { D2RendererOptions, defaultD2RendererOptions } from "./D2RendererOptions";
 import { D2WorkerEvent, getTiles } from "./D2RendererWorker";
 import { D2RendererWorkerAdapter } from "./D2RendererWorkerAdapter";
 import { hash } from "./hash";
@@ -44,8 +41,7 @@ class Tile extends PIXI.Sprite {
     // Return if hash did not change
     if (
       this.hash === hash &&
-      this.texture.width * this.texture.height >
-        texture.width * texture.height &&
+      this.texture.width * this.texture.height > texture.width * texture.height &&
       !isError &&
       !this.isError // if the texture is not an error, and the current texture is not an error
     )
@@ -57,7 +53,7 @@ class Tile extends PIXI.Sprite {
     public bounds: Bounds,
     public key: string,
     public hash?: string,
-    public isError: boolean = false
+    public isError: boolean = false,
   ) {
     super(texture);
     this.name = this.key;
@@ -66,11 +62,11 @@ class Tile extends PIXI.Sprite {
 }
 
 export class D2Renderer extends D2RendererBase {
-  protected declare app?: PIXI.Application<HTMLCanvasElement>;
+  declare protected app?: PIXI.Application<HTMLCanvasElement>;
   protected options: D2RendererOptions = defaultD2RendererOptions;
   protected system: Bush<CompiledD2IntrinsicComponent> = new Bush(9);
-  protected declare viewport?: Viewport;
-  protected declare overlay?: PIXI.Graphics;
+  declare protected viewport?: Viewport;
+  declare protected overlay?: PIXI.Graphics;
 
   #resolved: Record<string, boolean> = {};
   #tiles?: PIXI.Container<Tile>;
@@ -120,13 +116,10 @@ export class D2Renderer extends D2RendererBase {
   }
 
   #getUpdateGridQueue = once(() =>
-    throttle(() => this.#updateGrid(), this.options.refreshInterval)
+    throttle(() => this.#updateGrid(), this.options.refreshInterval),
   );
   #getUpdateOverlayQueue = once(() =>
-    throttle(
-      (e: PIXI.FederatedPointerEvent) => this.#updateHover(e),
-      this.options.refreshInterval
-    )
+    throttle((e: PIXI.FederatedPointerEvent) => this.#updateHover(e), this.options.refreshInterval),
   );
 
   protected override setupViewport(options: D2RendererOptions) {
@@ -142,8 +135,7 @@ export class D2Renderer extends D2RendererBase {
 
   #startDynamicResolution() {
     const { dynamicResolution } = this.options;
-    const { dtMax, dtMin, increment, intervalMs, maxScale, minScale } =
-      dynamicResolution;
+    const { dtMax, dtMin, increment, intervalMs, maxScale, minScale } = dynamicResolution;
     const targetFrames = floor(PIXI.Ticker.targetFPMS * intervalMs);
     let frames = 0;
     let cdt = 0;
@@ -153,13 +145,9 @@ export class D2Renderer extends D2RendererBase {
       if (!(frames % targetFrames)) {
         const adt = cdt / targetFrames;
         scale = clamp(
-          adt >= dtMax
-            ? scale + increment
-            : adt <= dtMin
-              ? scale - increment
-              : scale,
+          adt >= dtMax ? scale + increment : adt <= dtMin ? scale - increment : scale,
           minScale,
-          maxScale
+          maxScale,
         );
         map(this.#workers, (w) => {
           w.call("setTileResolution", [
@@ -201,12 +189,7 @@ export class D2Renderer extends D2RendererBase {
     });
   }
 
-  #handleUpdate({
-    bounds,
-    bitmap,
-    hash: nextHash,
-    isError,
-  }: D2WorkerEvent<"update">["payload"]) {
+  #handleUpdate({ bounds, bitmap, hash: nextHash, isError }: D2WorkerEvent<"update">["payload"]) {
     const texture = bitmap ? PIXI.Texture.from(bitmap) : undefined;
     this.#addToWorld(bounds, nextHash, texture, isError);
   }
@@ -214,9 +197,7 @@ export class D2Renderer extends D2RendererBase {
   protected override handleFrustumChange() {
     if (!this.viewport) return;
     const { top, bottom, left, right } = this.viewport;
-    map(this.#workers, (w) =>
-      w.call("setFrustum", [{ top, bottom, left, right }])
-    );
+    map(this.#workers, (w) => w.call("setFrustum", [{ top, bottom, left, right }]));
   }
 
   #updateGrid() {
@@ -263,11 +244,7 @@ export class D2Renderer extends D2RendererBase {
       .filter((c) => primitives[c.component.$].narrow(c.component, { x, y }));
     this.overlay!.clear();
     for (const b of bodies) {
-      this.overlay!.lineStyle(
-        2 * px,
-        accentColor,
-        "$info" in b.component ? 1 : 0.02
-      );
+      this.overlay!.lineStyle(2 * px, accentColor, "$info" in b.component ? 1 : 0.02);
       this.overlay?.drawRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
     }
   }
@@ -276,7 +253,7 @@ export class D2Renderer extends D2RendererBase {
     bounds: Bounds,
     nextHash: string,
     texture?: PIXI.Texture,
-    isError: boolean = false
+    isError: boolean = false,
   ) {
     if (!this.viewport) return;
 

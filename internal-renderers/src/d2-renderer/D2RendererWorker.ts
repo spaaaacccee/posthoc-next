@@ -1,17 +1,29 @@
 import interpolate from "color-interpolate";
 import { isEqual, isNumber, once } from "es-toolkit";
-import { ceil, floor, forEach, get, groupBy, head, identity, map, pick, range, shuffle, sortBy, throttle, truncate, values } from "es-toolkit/compat";
+import {
+  ceil,
+  floor,
+  forEach,
+  get,
+  groupBy,
+  head,
+  identity,
+  map,
+  pick,
+  range,
+  shuffle,
+  sortBy,
+  throttle,
+  truncate,
+  values,
+} from "es-toolkit/compat";
 import { nanoid } from "nanoid";
 import type { Bounds, Point, Size } from "protocol";
 import { ComponentEntry } from "renderer";
 import { Bush } from "./Bush";
 import { combinate } from "./combinate";
 import { CompiledD2IntrinsicComponent } from "./D2IntrinsicComponents";
-import {
-  D2RendererEvents,
-  D2RendererOptions,
-  defaultD2RendererOptions,
-} from "./D2RendererOptions";
+import { D2RendererEvents, D2RendererOptions, defaultD2RendererOptions } from "./D2RendererOptions";
 import { EventEmitter } from "./EventEmitter";
 import { _ } from "./chain";
 import { draw } from "./draw";
@@ -39,8 +51,8 @@ function wordWrap(text: string, width: number) {
                 text: `${prev.text}${next} `,
                 width: prev.width + next.length + 1,
               },
-        { width: 0, text: "" }
-      )
+        { width: 0, text: "" },
+      ),
   ).text;
 }
 
@@ -53,7 +65,7 @@ function wordWrap(text: string, width: number) {
 export function getTiles(
   { right, left, bottom, top }: Bounds,
   tileSubdivision: number,
-  shuffleTiles: boolean = true
+  shuffleTiles: boolean = true,
 ) {
   const zoom = max(z(right - left), z(bottom - top)) - tileSubdivision;
   const order = 2 ** zoom;
@@ -86,9 +98,7 @@ export function getTiles(
   };
 }
 
-export type D2WorkerRequest<
-  T extends keyof D2RendererWorker = keyof D2RendererWorker,
-> = {
+export type D2WorkerRequest<T extends keyof D2RendererWorker = keyof D2RendererWorker> = {
   action: T;
   payload: Parameters<D2RendererWorker[T]>;
 };
@@ -102,9 +112,7 @@ export type D2WorkerEvents = {
   };
 };
 
-export type D2WorkerEvent<
-  T extends keyof D2WorkerEvents = keyof D2WorkerEvents,
-> = {
+export type D2WorkerEvent<T extends keyof D2WorkerEvents = keyof D2WorkerEvents> = {
   action: T;
   payload: D2WorkerEvents[T];
 };
@@ -161,29 +169,16 @@ export class D2RendererWorker extends EventEmitter<
   } = {};
   #errors: { [K in string]: string } = {};
 
-  add(
-    components: ComponentEntry<CompiledD2IntrinsicComponent>[],
-    id: string,
-    now: number
-  ) {
+  add(components: ComponentEntry<CompiledD2IntrinsicComponent>[], id: string, now: number) {
     this.#now = now;
     const bodies = map(components, ({ component, meta }) => ({
       ...primitives[component.$].test(component),
       component,
-      meta: pick(
-        meta,
-        "sourceLayerIndex",
-        "sourceLayerAlpha",
-        "sourceLayerDisplayMode"
-      ),
+      meta: pick(meta, "sourceLayerIndex", "sourceLayerAlpha", "sourceLayerDisplayMode"),
       index: this.#next(),
     }));
     const b = bodies.find(
-      (c) =>
-        !isValue(c.top) ||
-        !isValue(c.bottom) ||
-        !isValue(c.left) ||
-        !isValue(c.right)
+      (c) => !isValue(c.top) || !isValue(c.bottom) || !isValue(c.left) || !isValue(c.right),
     );
     if (b) {
       this.#errors[id] =
@@ -220,7 +215,7 @@ export class D2RendererWorker extends EventEmitter<
       // Assume a font file at /fonts/inter.woff2, but ok if it doesn't exist
       const fontFace = new FontFace(
         "Inter",
-        "local('Inter'), local('Inter UI'), url('/fonts/inter.woff2') format('woff2'), url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiA.woff2) format('woff2'), local('-apple-system'), local('BlinkMacSystemFont'), local('Arial'), local('Helvetica'), local('sans-serif')"
+        "local('Inter'), local('Inter UI'), url('/fonts/inter.woff2') format('woff2'), url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiA.woff2) format('woff2'), local('-apple-system'), local('BlinkMacSystemFont'), local('Arial'), local('Helvetica'), local('sans-serif')",
       );
       // add it to the list of fonts our worker supports
       // `self.fonts` is the FontFaceSet on the WorkerGlobalScope (this code runs
@@ -238,10 +233,7 @@ export class D2RendererWorker extends EventEmitter<
 
   async render() {
     await this.loadFont();
-    for (const { tile, bounds } of getTiles(
-      this.#frustum,
-      this.#options.tileSubdivision
-    ).tiles) {
+    for (const { tile, bounds } of getTiles(this.#frustum, this.#options.tileSubdivision).tiles) {
       if (this.#shouldRender(tile)) {
         const out = this.renderTile(bounds, this.#options.tileResolution);
         if (out) {
@@ -256,7 +248,7 @@ export class D2RendererWorker extends EventEmitter<
                 isError: out.isError,
               },
             },
-            out.bitmap ? [out.bitmap] : []
+            out.bitmap ? [out.bitmap] : [],
           );
         }
       }
@@ -267,7 +259,7 @@ export class D2RendererWorker extends EventEmitter<
     throttle(() => this.render(), this.#options.refreshInterval, {
       leading: false,
       trailing: true,
-    })
+    }),
   );
 
   #shouldRender({ x, y }: Point) {
@@ -301,11 +293,7 @@ export class D2RendererWorker extends EventEmitter<
     for (const [a, i] of wordWrap(truncate(e, { length: 100 }), 28)
       .split("\n")
       .map((...args) => args)) {
-      ctx.fillText(
-        a,
-        px * fontSize,
-        px * fontSize * 2 + (leading + fontSize) * px * i
-      );
+      ctx.fillText(a, px * fontSize, px * fontSize * 2 + (leading + fontSize) * px * i);
     }
 
     ctx.lineWidth = px * 0.5;
@@ -332,7 +320,7 @@ export class D2RendererWorker extends EventEmitter<
           maxY: bottom,
           minY: top,
         }),
-        "index"
+        "index",
       );
       const nextHash = hash(map(bodies, "index"));
       const tileKey = hash([top, right, bottom, left, tile.width, tile.height]);
@@ -353,18 +341,8 @@ export class D2RendererWorker extends EventEmitter<
         const length = tile.width * 0.05;
         const thickness = 1;
         ctx.fillStyle = `rgba(127,127,127,0.36)`;
-        ctx.fillRect(
-          (tile.width - length) / 2,
-          (tile.height - thickness) / 2,
-          length,
-          thickness
-        );
-        ctx.fillRect(
-          (tile.width - thickness) / 2,
-          (tile.height - length) / 2,
-          thickness,
-          length
-        );
+        ctx.fillRect((tile.width - length) / 2, (tile.height - thickness) / 2, length, thickness);
+        ctx.fillRect((tile.width - thickness) / 2, (tile.height - length) / 2, thickness, length);
         _(
           bodies,
           (b) => sortBy(b, (c) => -(c.meta?.sourceLayerIndex ?? 0)),
@@ -381,12 +359,11 @@ export class D2RendererWorker extends EventEmitter<
                 });
               }
               const alpha = head(group)?.meta?.sourceLayerAlpha ?? 1;
-              const displayMode =
-                head(group)?.meta?.sourceLayerDisplayMode ?? "source-over";
+              const displayMode = head(group)?.meta?.sourceLayerDisplayMode ?? "source-over";
               ctx.globalCompositeOperation = displayMode;
               ctx.globalAlpha = alpha;
               ctx.drawImage(g2, 0, 0);
-            })
+            }),
         );
 
         const bitmap = g.transferToImageBitmap();

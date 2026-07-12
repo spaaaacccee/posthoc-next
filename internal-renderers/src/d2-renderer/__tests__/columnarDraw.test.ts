@@ -1,7 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SharedComponentStore } from "renderer";
-import { columnarDrawTransform, drawBody, resolveFill } from "../columnarDraw";
-import { buildIndex, openIndex, QueryScratch, queryVisible } from "../columnarIndex";
+import { packArrow, shadeOf } from "renderer";
+import {
+  buildLabelGrid,
+  columnarDrawTransform,
+  drawBody,
+  pxSize,
+  resolveFill,
+} from "../columnarDraw";
+import {
+  buildIndex,
+  isStepInvariant,
+  openIndex,
+  QueryScratch,
+  queryVisible,
+} from "../columnarIndex";
+import { getFillStyle } from "../primitives";
 
 const f32 = (a: number[]) => {
   const t = new Float32Array(new SharedArrayBuffer(a.length * 4));
@@ -69,7 +83,7 @@ describe("drawBody", () => {
       { top: 0, left: 0, right: 10, bottom: 10 },
       { width: 100, height: 100 },
     );
-    drawBody(store, 0, ctx as never, t, new Map());
+    drawBody(store, 0, ctx as never, t, new Map(), { step: 0 });
     expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 100, 100);
     expect(ctx.ellipse).not.toHaveBeenCalled();
   });
@@ -87,7 +101,7 @@ describe("drawBody", () => {
       { top: 90, left: 90, right: 110, bottom: 110 },
       { width: 20, height: 20 },
     );
-    drawBody(store, 1, ctx as never, t, new Map());
+    drawBody(store, 1, ctx as never, t, new Map(), { step: 0 });
     expect(ctx.ellipse).toHaveBeenCalled();
     expect(ctx.fillRect).not.toHaveBeenCalled();
   });
@@ -180,5 +194,326 @@ describe("queryVisible", () => {
     const out = queryVisible(store, fb, { top: -1, left: -1, right: n, bottom: 2 }, 5, { scratch });
     expect(out.length).toBe(n);
     expect(ids(out)).toEqual(Array.from({ length: n }, (_, i) => i));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Screen-space sizing, LOD, arrows, ramps, inline labels, label thinning.
+
+const u8 = (a: number[]) => {
+  const t = new Uint8Array(new SharedArrayBuffer(a.length));
+  t.set(a);
+  return t;
+};
+
+const ctx2d = () => ({
+  fillStyle: "",
+  strokeStyle: "",
+  lineWidth: 0,
+  lineCap: "",
+  lineJoin: "",
+  font: "",
+  textAlign: "",
+  textBaseline: "",
+  fillRect: vi.fn(),
+  beginPath: vi.fn(),
+  ellipse: vi.fn(),
+  fill: vi.fn(),
+  moveTo: vi.fn(),
+  lineTo: vi.fn(),
+  closePath: vi.fn(),
+  stroke: vi.fn(),
+  fillText: vi.fn(),
+});
+
+/** One circle of world radius `r` at the origin, in a 1:1 world→pixel tile. */
+function circleStore(r: number, extra: Partial<SharedComponentStore> = {}): SharedComponentStore {
+  return {
+    generation: 0,
+    count: 1,
+    total: 10,
+    kind: u8([1]),
+    x: f32([0]),
+    y: f32([0]),
+    size: f32([r]),
+    size2: f32([0]),
+    alpha: f32([1]),
+    start: i32([0]),
+    end: i32([10]),
+    fill: i32([1]),
+    palette: ["", "red"],
+    label: i32([0]),
+    strings: [""],
+    ptOff: i32([0, 0]),
+    pts: f32([]),
+    ...extra,
+  };
+}
+
+const unit = columnarDrawTransform(
+  { top: 0, left: 0, right: 100, bottom: 100 },
+  {
+    width: 100,
+    height: 100,
+  },
+);
+
+describe("pxSize", () => {
+  it("scales with zoom by default (world space, unchanged behaviour)", () => {
+    expect(pxSize(5, 4)).toBe(20);
+  });
+  it("ignores zoom under `screen`", () => {
+    expect(pxSize(14, 4, { screen: true })).toBe(14);
+  });
+  it("clamps into the pixel range", () => {
+    expect(pxSize(5, 0.01, { min: 2, max: 24 })).toBe(2);
+    expect(pxSize(5, 100, { min: 2, max: 24 })).toBe(24);
+    expect(pxSize(5, 2, { min: 2, max: 24 })).toBe(10);
+  });
+});
+
+describe("drawBody: level of detail", () => {
+  it("splats a sub-pixel circle with fillRect instead of an ellipse", () => {
+    // The load-bearing case: a million nodes zoomed out all land here, and this
+    // is what bounds fill rate by screen area rather than by node count.
+    const store = circleStore(0.4);
+    const ctx = ctx2d();
+    drawBody(store, 0, ctx as never, unit, new Map(), { step: 0 });
+    expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 1, 1);
+    expect(ctx.ellipse).not.toHaveBeenCalled();
+  });
+
+  it("draws an ellipse once the clamp lifts it above a pixel", () => {
+    const store = circleStore(0.4);
+    const ctx = ctx2d();
+    drawBody(store, 0, ctx as never, unit, new Map(), {
+      step: 0,
+      sizing: { circle: { min: 4 } },
+    });
+    expect(ctx.ellipse).toHaveBeenCalledWith(0, 0, 4, 4, 0, 0, Math.PI * 2);
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+  });
+});
+
+describe("drawBody: colour ramps", () => {
+  // A ramp over palette[1..4), traversed across 90 steps.
+  const ramped = () =>
+    circleStore(5, {
+      palette: ["", "#f00", "#888", "#111"],
+      ramp: u8([1]),
+      ramps: [{ offset: 1, length: 3, window: 90 }],
+      start: i32([100]),
+    });
+
+  const shadeAt = (step: number) => {
+    const store = ramped();
+    const ctx = ctx2d();
+    drawBody(store, 0, ctx as never, unit, new Map(), { step });
+    return ctx.fillStyle;
+  };
+
+  it("walks the ramp with the body's age, then holds the last colour", () => {
+    expect(shadeAt(100)).toBe(getFillStyle("#f00", 1)); // age 0   -> bucket 0
+    expect(shadeAt(140)).toBe(getFillStyle("#888", 1)); // age 40  -> bucket 1
+    expect(shadeAt(180)).toBe(getFillStyle("#111", 1)); // age 80  -> bucket 2
+    expect(shadeAt(9999)).toBe(getFillStyle("#111", 1)); // saturated
+  });
+
+  it("shadeOf agrees with the draw path — the tile hash depends on it", () => {
+    // If these two ever disagreed the content hash would be a lie and the tile
+    // cache would serve a stale fade.
+    const store = ramped();
+    expect(shadeOf(store, 0, 100)).toBe(1);
+    expect(shadeOf(store, 0, 140)).toBe(2);
+    expect(shadeOf(store, 0, 9999)).toBe(3);
+  });
+
+  it("clamps ages before the body exists", () => {
+    expect(shadeOf(ramped(), 0, 50)).toBe(1);
+  });
+});
+
+describe("isStepInvariant", () => {
+  it("is false for a ramped store even when every body is always visible", () => {
+    // Visibility is step-independent here; colour is not. Caching the raster
+    // would freeze the fade.
+    const store = circleStore(5, {
+      ramp: u8([1]),
+      ramps: [{ offset: 1, length: 2, window: 10 }],
+    });
+    expect(isStepInvariant(store)).toBe(false);
+    expect(isStepInvariant(circleStore(5))).toBe(true);
+  });
+});
+
+describe("drawBody: arrowheads", () => {
+  /** A 2-point path from (0,0) to (50,0), with `arrow` packed in. */
+  const edge = (arrow: number, arrowSize = 10) =>
+    ({
+      generation: 0,
+      count: 1,
+      total: 10,
+      kind: u8([2]),
+      x: f32([0]),
+      y: f32([0]),
+      size: f32([1]),
+      size2: f32([arrowSize]),
+      alpha: f32([1]),
+      start: i32([0]),
+      end: i32([10]),
+      fill: i32([1]),
+      palette: ["", "red"],
+      label: i32([0]),
+      strings: [""],
+      ptOff: i32([0, 2]),
+      pts: f32([0, 0, 50, 0]),
+      arrow: u8([arrow]),
+    }) as SharedComponentStore;
+
+  it("draws no head when the arrow column says none", () => {
+    const ctx = ctx2d();
+    drawBody(edge(packArrow(0, 0)), 0, ctx as never, unit, new Map(), { step: 0 });
+    expect(ctx.stroke).toHaveBeenCalled();
+    expect(ctx.closePath).not.toHaveBeenCalled(); // the head is the only closed path
+  });
+
+  it("draws a triangle at the terminal vertex, pointing along the last segment", () => {
+    const ctx = ctx2d();
+    drawBody(edge(packArrow(0, 1)), 0, ctx as never, unit, new Map(), { step: 0 });
+    // Tip at the last point; base 10px back along +x; corners spread +/-5px on y.
+    expect(ctx.moveTo).toHaveBeenCalledWith(50, 0);
+    expect(ctx.lineTo).toHaveBeenCalledWith(40, 5);
+    expect(ctx.lineTo).toHaveBeenCalledWith(40, -5);
+    expect(ctx.closePath).toHaveBeenCalled();
+  });
+
+  it("draws a head at the first vertex too, pointing the other way", () => {
+    const ctx = ctx2d();
+    drawBody(edge(packArrow(1, 1)), 0, ctx as never, unit, new Map(), { step: 0 });
+    expect(ctx.moveTo).toHaveBeenCalledWith(0, 0);
+    expect(ctx.lineTo).toHaveBeenCalledWith(10, -5);
+    expect(ctx.lineTo).toHaveBeenCalledWith(10, 5);
+  });
+
+  it("sizes the head in screen pixels, so zoom does not change it", () => {
+    const zoomed = columnarDrawTransform(
+      { top: 0, left: 0, right: 10, bottom: 10 },
+      {
+        width: 100,
+        height: 100,
+      },
+    );
+    const ctx = ctx2d();
+    drawBody(edge(packArrow(0, 1)), 0, ctx as never, zoomed, new Map(), { step: 0 });
+    // 10x zoom: the tip moves, but the head is still 10px long and 10px wide.
+    expect(ctx.moveTo).toHaveBeenCalledWith(500, 0);
+    expect(ctx.lineTo).toHaveBeenCalledWith(490, 5);
+    expect(ctx.lineTo).toHaveBeenCalledWith(490, -5);
+  });
+});
+
+describe("buildLabelGrid", () => {
+  /** `n` labelled circles strung along y=0 at x = 0, 10, 20, ..., sizes 1..n. */
+  function labelled(n: number): SharedComponentStore {
+    return {
+      generation: 0,
+      count: n,
+      total: 10,
+      kind: u8(Array(n).fill(1)),
+      x: f32(Array.from({ length: n }, (_, i) => i * 10)),
+      y: f32(Array(n).fill(0)),
+      size: f32(Array.from({ length: n }, (_, i) => i + 1)),
+      size2: f32(Array(n).fill(0)),
+      alpha: f32(Array(n).fill(1)),
+      start: i32(Array(n).fill(0)),
+      end: i32(Array(n).fill(10)),
+      fill: i32(Array(n).fill(1)),
+      palette: ["", "red"],
+      label: i32(Array.from({ length: n }, (_, i) => i + 1)),
+      strings: ["", ...Array.from({ length: n }, (_, i) => `n${i}`)],
+      ptOff: i32(Array(n + 1).fill(0)),
+      pts: f32([]),
+    };
+  }
+
+  const tile = { width: 100, height: 100 };
+  const all = (n: number) => Uint32Array.from({ length: n }, (_, i) => i);
+
+  it("keeps the highest-`size` body per cell", () => {
+    // 10 bodies at x = 0..90, cells 50px wide => two cells. Winners are the
+    // largest in each: index 4 (x=40, size 5) and index 9 (x=90, size 10).
+    const store = labelled(10);
+    const won = buildLabelGrid(store, all(10), unit, tile, {
+      grid: { width: 50, height: 100 },
+    });
+    expect([...won!].sort((a, b) => a - b)).toEqual([4, 9]);
+  });
+
+  it("draws every label when the cells are small enough to hold them", () => {
+    // Zoom in (cells cover less world) and every body wins its own cell. This is
+    // "more labels as you zoom in", and it needs no threshold.
+    const store = labelled(10);
+    const won = buildLabelGrid(store, all(10), unit, tile, {
+      grid: { width: 10, height: 100 },
+    });
+    expect(won!.size).toBe(10);
+  });
+
+  it("thins against the visible set, not the store", () => {
+    // The reason thinning is per-tile-per-step rather than a precomputed rank
+    // column. Bodies 0 (x=0) and 5 (x=50) sit in different cells, so both keep
+    // their labels — even though the store holds 10 bodies and body 5 would lose
+    // its cell outright to body 9 if all ten were live.
+    //
+    // A precomputed rank would have thinned 0 and 5 against the *final* node set,
+    // leaving step 100 of a million-node trace almost entirely unlabelled.
+    const store = labelled(10);
+    const live = Uint32Array.from([0, 5]);
+    const won = buildLabelGrid(store, live, unit, tile, {
+      grid: { width: 50, height: 100 },
+    });
+    expect([...won!].sort((a, b) => a - b)).toEqual([0, 5]);
+
+    // Same two cells, all ten bodies live: the bigger neighbours take both.
+    const crowded = buildLabelGrid(store, all(10), unit, tile, {
+      grid: { width: 50, height: 100 },
+    });
+    expect([...crowded!].sort((a, b) => a - b)).toEqual([4, 9]);
+  });
+
+  it("is undefined without a grid, meaning draw every label", () => {
+    expect(buildLabelGrid(labelled(3), all(3), unit, tile, {})).toBeUndefined();
+  });
+});
+
+describe("drawBody: inline labels", () => {
+  const store = () => circleStore(5, { label: i32([1]), strings: ["", "n42"] });
+
+  it("draws the label clear of the body's edge, in screen pixels", () => {
+    const ctx = ctx2d();
+    drawBody(store(), 0, ctx as never, unit, new Map(), {
+      step: 0,
+      label: { size: 12, offset: 4, color: "#000" },
+    });
+    // Circle radius 5px at the origin; label sits at 5 + 4 = 9px to the right.
+    expect(ctx.fillText).toHaveBeenCalledWith("n42", 9, 0);
+    expect(ctx.font).toBe("12px Inter, Helvetica, Arial, sans-serif");
+  });
+
+  it("does not draw a label the grid thinned out", () => {
+    const ctx = ctx2d();
+    drawBody(store(), 0, ctx as never, unit, new Map(), {
+      step: 0,
+      label: { size: 12 },
+      labels: new Set<number>(), // won nothing
+    });
+    expect(ctx.fillText).not.toHaveBeenCalled();
+    expect(ctx.ellipse).toHaveBeenCalled(); // the node itself still draws
+  });
+
+  it("draws nothing extra when the layer has no label policy", () => {
+    const ctx = ctx2d();
+    drawBody(store(), 0, ctx as never, unit, new Map(), { step: 0 });
+    expect(ctx.fillText).not.toHaveBeenCalled();
   });
 });

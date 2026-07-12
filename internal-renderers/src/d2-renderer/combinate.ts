@@ -6,7 +6,7 @@
  * interop under the current bundler (`combinate is not a function`).
  */
 export function combinate<O extends Record<string | number, readonly any[]>>(
-  obj: O
+  obj: O,
 ): { [K in keyof O]: O[K][number] }[] {
   let combos: Record<string, any>[] = [];
   for (const key in obj) {

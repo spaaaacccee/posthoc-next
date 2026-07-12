@@ -11,7 +11,7 @@ export function drawPrimitive(
   type: string,
   component: CompiledD2Component<any>,
   g: OffscreenCanvasRenderingContext2D,
-  t: Transform
+  t: Transform,
 ) {
   if (type in primitives) {
     primitives[type].draw(component, g, t);
@@ -21,7 +21,7 @@ export function drawPrimitive(
 export const draw = <T extends keyof D2Components>(
   c: CompiledD2Component<T>,
   g: OffscreenCanvasRenderingContext2D,
-  t: Transform
+  t: Transform,
 ) => {
   drawPrimitive(c.$, c, g, t);
   /// version < 1.4.0 compat

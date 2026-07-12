@@ -426,3 +426,100 @@ describe("D2RendererV2Worker", () => {
     });
   });
 });
+
+/**
+ * One ramped circle: born at step 10, fading across 3 colours over 100 steps.
+ * Every body is always visible, so *visibility* is step-invariant — only the
+ * colour moves.
+ */
+function makeRampedStore(): SharedComponentStore {
+  const kind = new Uint8Array(new SharedArrayBuffer(1));
+  kind.set([1]); // circle
+  const ramp = new Uint8Array(new SharedArrayBuffer(1));
+  ramp.set([1]);
+  return {
+    generation: 1,
+    count: 1,
+    total: 10_000,
+    kind,
+    x: f32([10]),
+    y: f32([10]),
+    size: f32([5]),
+    size2: f32([0]),
+    alpha: f32([1]),
+    start: i32([10]),
+    end: i32([10_000]),
+    fill: i32([1]),
+    palette: ["", "#f00", "#888", "#111"],
+    label: i32([0]),
+    strings: [""],
+    ptOff: i32([0, 0]),
+    pts: f32([]),
+    ramp,
+    ramps: [{ offset: 1, length: 3, window: 100 }],
+  };
+}
+
+/** Tiles this render actually re-rasterized (a hash-only update is a cache hit). */
+const repainted = (events: D2V2WorkerEvent[]) => updates(events).filter((e) => e.payload.bitmap);
+
+describe("colour ramps", () => {
+  function rampedWorker() {
+    const worker = makeWorker();
+    const store = makeRampedStore();
+    worker.setLayer("a", { store, generation: store.generation });
+    worker.buildLayerIndex("a");
+    return worker;
+  }
+
+  it("repaints only when a body crosses a ramp bucket, not on every step", () => {
+    // This is the invariant the whole ramp design rests on. The tile hash folds
+    // each ramped body's *bucket*, not the raw step — so advancing the playhead
+    // within a bucket changes nothing and the tile stays cached. Folding the step
+    // itself would be correct but would repaint every tile on every step, which
+    // is precisely the thing being replaced.
+    const worker = rampedWorker();
+    const events = capture(worker);
+
+    worker.setStep(10);
+    worker.render();
+    expect(repainted(events).length).toBeGreaterThan(0); // first paint
+
+    events.length = 0;
+    worker.setStep(11); // age 0 -> 1: still bucket 0
+    worker.render();
+    expect(repainted(events)).toHaveLength(0);
+
+    events.length = 0;
+    worker.setStep(50); // age 40: bucket 1
+    worker.render();
+    expect(repainted(events)).toHaveLength(1);
+  });
+
+  it("stops repainting once a tile's ramps have saturated", () => {
+    // The payoff: an old, fully-faded region of the graph costs nothing to scrub
+    // past, however far the playhead moves. Only tiles near the search frontier
+    // re-rasterize — and a frontier is spatially local, which is why this beats
+    // sigma's recolour-everything-every-step.
+    const worker = rampedWorker();
+    const events = capture(worker);
+
+    worker.setStep(500); // long past the 100-step window
+    worker.render();
+    expect(repainted(events).length).toBeGreaterThan(0);
+
+    events.length = 0;
+    worker.setStep(9_999); // still saturated: same bucket, same hash
+    worker.render();
+    expect(repainted(events)).toHaveLength(0);
+  });
+
+  it("never caches a ramped layer's raster, even though its bodies never move", () => {
+    // `isStepInvariant` must reject a ramped store: caching its raster would
+    // freeze the fade at whatever step it was first drawn.
+    const worker = rampedWorker();
+    worker.setStep(20);
+    worker.render();
+    expect(worker.layerTileCacheSize).toBe(0);
+  });
+});

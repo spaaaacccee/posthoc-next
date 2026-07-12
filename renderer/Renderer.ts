@@ -34,7 +34,7 @@ type Meta = {
 
 export type ComponentEntry<
   V extends CompiledComponent<any, any> = CompiledComponent<string, {}>,
-  M = Meta
+  M = Meta,
 > = {
   component: V;
   meta?: M;
@@ -48,7 +48,7 @@ export interface Renderer<
   T extends RendererOptions = RendererOptions,
   U extends RendererEvents = RendererEvents,
   V extends CompiledComponent<any, any> = CompiledComponent<string, {}>,
-  M = Meta
+  M = Meta,
 > extends EventEmitter<U> {
   setup(options: Partial<T>): void;
   destroy(): void;
@@ -87,7 +87,7 @@ type RendererMetadata = FeatureDescriptor & {
 export type RendererDefinition<
   T extends RendererOptions,
   U extends RendererEvents,
-  V extends CompiledComponent<any, any>
+  V extends CompiledComponent<any, any>,
 > = {
   constructor: new () => Renderer<T, U, V>;
   meta: RendererMetadata;
@@ -96,10 +96,7 @@ export type RendererDefinition<
 export function makeRenderer<
   T extends RendererOptions,
   U extends RendererEvents,
-  V extends CompiledComponent<any, any>
->(
-  Renderer: new () => Renderer<T, U, V>,
-  options: RendererMetadata
-): RendererDefinition<T, U, V> {
+  V extends CompiledComponent<any, any>,
+>(Renderer: new () => Renderer<T, U, V>, options: RendererMetadata): RendererDefinition<T, U, V> {
   return { constructor: Renderer, meta: options };
 }

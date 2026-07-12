@@ -13,10 +13,7 @@ export class D2RendererV2WorkerAdapter extends Worker {
   ) {
     return this.postMessage({ action, payload }, transfer);
   }
-  on<T extends keyof D2V2WorkerEvents>(
-    event: T,
-    handler: (payload: D2V2WorkerEvents[T]) => void,
-  ) {
+  on<T extends keyof D2V2WorkerEvents>(event: T, handler: (payload: D2V2WorkerEvents[T]) => void) {
     const f = (e: MessageEvent<D2V2WorkerEvent>) => {
       const { action, payload } = e.data;
       if (action === event) handler(payload as D2V2WorkerEvents[T]);
