@@ -83,15 +83,22 @@ const NODE_SCALE = 10;
 const plotMarkerPx = (n: number): number => (n >= 100_000 ? 2 : n >= 10_000 ? 3 : 5);
 
 /**
- * Arrowhead size, in screen pixels, and the pixel ceiling on an edge's width.
+ * Arrowhead size, and the width of an edge.
  *
  * They are declared together because only their *ratio* matters. `drawArrowhead`
- * makes a triangle as wide as it is long, so a head is only legible as a head if it
+ * makes a triangle as wide as it is long, so a head is legible as a head only if it
  * clearly out-measures the line it terminates: at 8px on an edge free to clamp to
- * 6px, it reads as the line getting slightly fatter and nothing more.
+ * 6px it read as the line getting slightly fatter, and nothing more. Keep the head
+ * at roughly 3x the edge's ceiling.
+ *
+ * An edge's width has to be scaled at all three of these at once. `EDGE_WIDTH` is
+ * world-space and only bites in the middle of the zoom range; at the ends the pixel
+ * clamps are what you actually see. Scaling one alone just moves where it clamps.
  */
-const ARROW_PX = 12;
-const EDGE_MAX_PX = 4;
+const ARROW_PX = 18;
+const EDGE_WIDTH = 1.5; // world units per unit of `1 + log(traversals)`
+const EDGE_MIN_PX = 1.5;
+const EDGE_MAX_PX = 6;
 
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
@@ -531,7 +538,7 @@ export function buildGraphStore({
       const child = firstOf.get(e.from);
       const parent = firstOf.get(e.to);
       if (child === undefined || parent === undefined) continue;
-      edge(ghost, g, gpt, parent, child, 1, 0, e.at, GHOST_RADIUS);
+      edge(ghost, g, gpt, parent, child, EDGE_WIDTH, 0, e.at, GHOST_RADIUS);
       gpt += 4;
       g++;
     }
@@ -583,7 +590,7 @@ export function buildGraphStore({
       pt,
       parent,
       child,
-      1 + Math.log(edgeVisits[k]!),
+      EDGE_WIDTH * (1 + Math.log(edgeVisits[k]!)),
       i,
       allEdges ? total : until[i]!,
       nodeSize[i]!,
@@ -730,7 +737,7 @@ function layerParams(mode: GraphMode, marker: number, labelColor = "#888888"): L
       // are affordable and legibility wins: at 1px a fitted tree is a smear of dots,
       // which is what "nodes are way too small" looked like.
       circle: { min: 3, max: 24 },
-      path: { min: 1, max: EDGE_MAX_PX },
+      path: { min: EDGE_MIN_PX, max: EDGE_MAX_PX },
     },
     label: {
       size: 12,

@@ -1,5 +1,6 @@
 import { AccountTreeOutlined } from "@mui-symbols-material/w300";
 import { Box, useTheme } from "@mui/material";
+import interpolate from "color-interpolate";
 import { Block } from "components/generic/Block";
 import { LayerPicker } from "components/generic/LayerPicker";
 import { Spinner } from "components/generic/Spinner";
@@ -85,7 +86,18 @@ export function TreePage({ template: Page }: PageContentProps) {
   const edgeColor = theme.palette.divider;
   // The un-searched tree. Faint, but present from step 0, so the shape of the whole
   // search is visible before the playhead reaches it.
-  const ghostColor = theme.palette.action.disabledBackground;
+  // Sigma's un-searched colour, recovered rather than guessed.
+  //
+  // It looked like a theme token but wasn't: everything un-visited was painted with
+  // `getGraphColorHex(type, 0, background, foreground)`, and at strength 0 that
+  // collapses to `interpolate([background, foreground])(0.1)` — the event type falls
+  // out of the expression entirely. So the ghost is a *computed* blend, a tenth of
+  // the way from the paper towards the text colour, and no palette entry is it.
+  const foreground = theme.palette.text.primary;
+  const ghostColor = useMemo(
+    () => interpolate([background, foreground])(0.1),
+    [background, foreground],
+  );
   const labelColor = theme.palette.text.secondary;
 
   const { data: graph, isLoading: isGraphLoading } = useGraphStore({

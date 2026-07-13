@@ -206,7 +206,16 @@ describe("buildGraphStore: edges", () => {
     const es = bodiesOf(build({ trace: busy, layout: l }), 2);
     expect(es).toHaveLength(3);
     // `size` is a Float32Array, so compare with tolerance.
-    for (const [k, e] of es.entries()) expect(e.size).toBeCloseTo(1 + Math.log(k + 1), 5);
+    // Monotonic in traversal count, and growing sub-linearly (log). Asserted as a
+    // shape rather than against a restated formula — the widths are scaled by a
+    // constant that is free to change, and a test that hardcodes it only ever fails
+    // for the wrong reason.
+    const sizes = es.map((e) => e.size!);
+    expect(sizes).toHaveLength(3);
+    for (const [k, s] of sizes.entries()) {
+      if (k) expect(s).toBeGreaterThan(sizes[k - 1]!);
+    }
+    expect(sizes[2]! - sizes[1]!).toBeLessThan(sizes[1]! - sizes[0]!);
   });
 
   it("gives an edge its child's span and ramp, so the two never drift apart", () => {

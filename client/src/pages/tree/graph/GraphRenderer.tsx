@@ -53,6 +53,12 @@ export type GraphRendererProps = {
    * Opacity of the un-searched tree. A layer param, so dragging it re-composites
    * from the tile cache — it never re-rasterizes, repacks a column, or rebuilds an
    * index.
+   *
+   * Defaults to opaque, because the ghost's *colour* already carries the fading:
+   * it is a blend a tenth of the way from the background towards the foreground
+   * (see `ghostColor`), which is what sigma painted un-visited nodes. Dimming that
+   * again would land it at a twenty-fifth of the way and reintroduce the "where did
+   * the tree go" problem the colour was chosen to avoid.
    */
   ghostAlpha?: number;
   /** A body was clicked, topmost first. `undefined` when empty space was hit. */
@@ -69,7 +75,7 @@ export function GraphRenderer({
   graph,
   step,
   shading,
-  ghostAlpha = 0.4,
+  ghostAlpha = 1,
   onClickBody,
   fitKey,
   onRenderer,
