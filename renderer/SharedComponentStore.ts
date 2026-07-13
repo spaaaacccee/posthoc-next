@@ -228,25 +228,73 @@ export type LayerShading = Pick<
  * Both fall out of the same three knobs, and omitting all of them leaves the
  * original pure-world-space behaviour untouched.
  */
+/**
+ * Soften world-space growth across a zoom band — a *multiplier* on the size, not a
+ * bound on it.
+ *
+ * Clamps are a blunt instrument: outside `[min, max]` a body is **pinned**, so it
+ * stops responding to zoom entirely and a world-space layer starts feeling
+ * screen-space. Damping never pins. It scales the size instead:
+ *
+ *  - zoomed out far enough (natural size <= `from`), multiply by `fromScale`. Above 1,
+ *    so a body that world-space would render sub-pixel is lifted into view.
+ *  - zoomed in far enough (natural size >= `to`), multiply by `toScale`. Below 1, so a
+ *    body that world-space would render as a blob is held back.
+ *  - in between, interpolate geometrically — growth is damped but never stops.
+ *
+ * "Natural size" is what pure world-space would give: `size * zoom`, in CSS pixels.
+ * Stating the knees that way rather than as absolute zoom levels keeps the policy
+ * independent of whatever units the layout happens to use.
+ *
+ * Two limits are worth knowing. `fromScale === toScale === 1` is pure world-space.
+ * `fromScale / toScale === to / from` is exactly *constant screen size* across the
+ * band — so the ratio between the scales is a dial from world-space to screen-space,
+ * and anything in between is the "screen-space-ish" middle.
+ */
+export type SizeDamping = {
+  /** Natural (undamped, world-space) CSS size at which damping begins. */
+  from: number;
+  /** Natural CSS size at which damping ends. */
+  to: number;
+  /** Multiplier at or below `from`. `>= 1` renders far-out bodies larger than world. */
+  fromScale: number;
+  /** Multiplier at or above `to`. `<= 1` renders zoomed-in bodies smaller than world. */
+  toScale: number;
+};
+
 export type KindSizing = {
-  /** Read `size` as screen pixels directly, ignoring zoom. */
+  /** Read `size` as CSS pixels directly, ignoring zoom. */
   screen?: boolean;
-  /** Floor the pixel size. Below ~1 a body would vanish; at 1 it splats. */
+  /**
+   * Damp world-space growth over a zoom band. Applied before {@link KindSizing.min} /
+   * {@link KindSizing.max}, which stay on as absolute guard rails — with damping in
+   * place they should rarely bind, which is the point.
+   */
+  damp?: SizeDamping;
+  /** Floor the CSS pixel size. Below ~1 a body would vanish; at 1 it splats. */
   min?: number;
-  /** Ceil the pixel size. */
+  /**
+   * Ceil the CSS pixel size.
+   *
+   * Mind the *band*, not just the values: a world-space body lives between `min` and
+   * `max` and is pinned outside them, so a narrow band makes a world-space layer feel
+   * screen-space. A graph clamped to [3, 24] hit its ceiling by 4x zoom and held it
+   * for every zoom beyond — a constant screen size, which is the thing world-space
+   * sizing exists to avoid.
+   */
   max?: number;
 };
 
 /** Rendering of inline labels (see {@link SharedComponentStore.label}). */
 export type LabelSizing = {
-  /** Font size in screen pixels. */
+  /** Font size in CSS pixels. */
   size?: number;
   /** CSS colour. Labels ignore their body's fill, as v1's `draw` did. */
   color?: string;
-  /** Gap in screen pixels between the body's edge and the label. */
+  /** Gap in CSS pixels between the body's edge and the label. */
   offset?: number;
   /**
-   * Cell size in screen pixels for the per-tile label grid. At most one label is
+   * Cell size in CSS pixels for the per-tile label grid. At most one label is
    * drawn per cell, the one on the highest-`size` body — which is what stops
    * labels crowding as you zoom out, without any viewport-global decluttering
    * pass (impossible here: tiles are rasterized independently, in parallel, and

@@ -60,7 +60,7 @@ const FLOOR = 0.25;
  *
  * It must not touch plot mode. See {@link plotMarkerPx}.
  */
-const NODE_SCALE = 10;
+const NODE_SCALE = 6;
 
 /**
  * A scatter point's radius, in **screen pixels**.
@@ -80,24 +80,26 @@ const NODE_SCALE = 10;
  * and a single `fillRect`. Below that a plot is sparse enough that ellipses are
  * free, so legibility wins instead.
  */
-const plotMarkerPx = (n: number): number => (n >= 100_000 ? 2 : n >= 10_000 ? 3 : 5);
+const plotMarkerPx = (n: number): number => (n >= 100_000 ? 1.5 : n >= 10_000 ? 2.5 : 4);
 
 /**
- * Arrowhead size, and the width of an edge.
+ * Arrowhead size, and the width of an edge. **All `*_PX` values here are CSS pixels**
+ * — see `DrawOptions.pixelScale`; they used to be tile pixels, which were 4-9x
+ * smaller and drifted with zoom, so every one of these constants had been inflated to
+ * compensate.
  *
- * They are declared together because only their *ratio* matters. `drawArrowhead`
- * makes a triangle as wide as it is long, so a head is legible as a head only if it
- * clearly out-measures the line it terminates: at 8px on an edge free to clamp to
- * 6px it read as the line getting slightly fatter, and nothing more. Keep the head
- * at roughly 3x the edge's ceiling.
+ * Head and edge are declared together because only their *ratio* matters.
+ * `drawArrowhead` makes a triangle as wide as it is long, so a head reads as a head
+ * only if it clearly out-measures the line it terminates. Keep it at roughly 3x the
+ * edge's ceiling.
  *
- * An edge's width has to be scaled at all three of these at once. `EDGE_WIDTH` is
- * world-space and only bites in the middle of the zoom range; at the ends the pixel
- * clamps are what you actually see. Scaling one alone just moves where it clamps.
+ * An edge's width has to be set at all three knobs at once: `EDGE_WIDTH` is
+ * world-space and only bites in the middle of the zoom range, while at either end the
+ * pixel clamps are what you actually see.
  */
-const ARROW_PX = 18;
-const EDGE_WIDTH = 1.5; // world units per unit of `1 + log(traversals)`
-const EDGE_MIN_PX = 1.5;
+const ARROW_PX = 10;
+const EDGE_WIDTH = 3; // world units per unit of `1 + log(traversals)`
+const EDGE_MIN_PX = 0.75;
 const EDGE_MAX_PX = 6;
 
 export type GraphMode = "tree" | "directed-graph" | "plot";
@@ -730,17 +732,31 @@ function layerParams(mode: GraphMode, marker: number, labelColor = "#888888"): L
   }
   return {
     sizing: {
-      // World-space, so nodes spread apart as you zoom in — but clamped, because a
-      // node that keeps growing becomes a blob and one that keeps shrinking
-      // vanishes. Floored at 3 rather than 1 because a tree draws one circle per
-      // *unique id* (25k on the trace where the plot has 717k points), so ellipses
-      // are affordable and legibility wins: at 1px a fitted tree is a smear of dots,
-      // which is what "nodes are way too small" looked like.
-      circle: { min: 3, max: 24 },
-      path: { min: EDGE_MIN_PX, max: EDGE_MAX_PX },
+      // World-space, *damped* — not clamped. See {@link SizeDamping}.
+      //
+      // Clamps alone cannot express what a graph wants. Outside `[min, max]` a body is
+      // pinned, so it stops answering the camera altogether: at [3, 24] a node hit its
+      // ceiling by 4x zoom and held it for every zoom beyond, which is a world-space
+      // graph that behaves like a screen-space one. Damping bends instead of pinning.
+      // Zoomed out, a node is lifted *above* true world-space so a dense tree stays a
+      // field of dots rather than dust; zoomed in it is held *below*, so it never
+      // becomes a blob — and in between it still grows, just sub-linearly.
+      //
+      // The exponent these numbers imply is ~0.56: the node grows like the square root
+      // of the zoom. `min`/`max` stay on as guard rails and should almost never bind.
+      circle: {
+        damp: { from: 1.5, to: 40, fromScale: 1.25, toScale: 0.3 },
+        min: 1,
+        max: 32,
+      },
+      path: {
+        damp: { from: 0.5, to: 10, fromScale: 3, toScale: 0.3 },
+        min: EDGE_MIN_PX,
+        max: EDGE_MAX_PX,
+      },
     },
     label: {
-      size: 12,
+      size: 24,
       color: labelColor,
       offset: 4,
       // One label per cell. Sized so a 512px tile holds ~8x16 of them.

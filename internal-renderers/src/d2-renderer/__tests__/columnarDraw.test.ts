@@ -355,6 +355,81 @@ describe("isStepInvariant", () => {
   });
 });
 
+describe("pxSize: CSS pixels vs tile pixels", () => {
+  // A tile rasterizes into a bitmap that is stretched over its world bounds, so its
+  // pixels are not CSS pixels — and `getTiles` snaps the tile's world size to a power
+  // of two while the camera zooms continuously, so the ratio is not even constant.
+  // Every screen-space quantity is therefore stated in CSS px and scaled here.
+  it("scales the clamps by pixelScale", () => {
+    // A world size that would land at 10 tile px, under a 24 CSS px ceiling.
+    expect(pxSize(10, 1, { min: 3, max: 24 }, 1)).toBe(10);
+    // At 4 tile px per CSS px, the same ceiling is 96 tile px — so 10 is untouched,
+    // and the *floor* is now 12, which lifts it.
+    expect(pxSize(10, 1, { min: 3, max: 24 }, 4)).toBe(12);
+    // And a body that overshoots is capped at 24 CSS px, i.e. 96 tile px.
+    expect(pxSize(1000, 1, { min: 3, max: 24 }, 4)).toBe(96);
+  });
+
+  it("scales a screen-space size by pixelScale, not by the world scale", () => {
+    expect(pxSize(12, 999, { screen: true }, 4)).toBe(48); // 12 CSS px -> 48 tile px
+  });
+
+  it("defaults to 1, so a caller drawing straight to the screen is unaffected", () => {
+    expect(pxSize(10, 1, { min: 3, max: 24 })).toBe(10);
+    expect(pxSize(12, 999, { screen: true })).toBe(12);
+  });
+});
+
+describe("pxSize: damping", () => {
+  // Damping is a *multiplier* on the world size, not a bound on it. Below `from` a
+  // body is drawn larger than world-space (so it does not vanish), above `to` smaller
+  // (so it does not become a blob), and in between the growth is bent rather than
+  // stopped — which is the thing a clamp cannot express, because a clamp pins.
+  const damp = { from: 2, to: 32, fromScale: 2, toScale: 0.5 };
+  const draw = (world: number) => pxSize(world, 1, { damp });
+
+  it("scales up below the lower knee, and down above the upper one", () => {
+    expect(draw(1)).toBeCloseTo(2, 5); // 1 * fromScale
+    expect(draw(64)).toBeCloseTo(32, 5); // 64 * toScale
+  });
+
+  it("interpolates geometrically between the knees", () => {
+    // Halfway in log space between 2 and 32 is 8; the scale there is the geometric
+    // mean of 2 and 0.5, which is 1 — so the body draws at exactly its world size.
+    expect(draw(8)).toBeCloseTo(8, 5);
+  });
+
+  it("never pins: the size keeps answering the camera", () => {
+    // The failure a clamp has, stated as a test. Across the band, every doubling of
+    // the world size still grows the body — just by less than double.
+    for (const w of [2, 4, 8, 16]) {
+      const growth = draw(w * 2) / draw(w);
+      expect(growth).toBeGreaterThan(1);
+      expect(growth).toBeLessThan(2);
+    }
+  });
+
+  it("degenerates to world-space when both scales are 1", () => {
+    const none = { from: 2, to: 32, fromScale: 1, toScale: 1 };
+    for (const w of [1, 8, 64]) expect(pxSize(w, 1, { damp: none })).toBeCloseTo(w, 5);
+  });
+
+  it("is exactly screen-space when the scale ratio equals the size ratio", () => {
+    // fromScale/toScale === to/from (16) => constant drawn size across the band.
+    const flat = { from: 2, to: 32, fromScale: 4, toScale: 0.25 };
+    const at = (w: number) => pxSize(w, 1, { damp: flat });
+    expect(at(2)).toBeCloseTo(8, 5);
+    expect(at(8)).toBeCloseTo(8, 5);
+    expect(at(32)).toBeCloseTo(8, 5);
+  });
+
+  it("measures its knees in CSS pixels, like every other screen-space quantity", () => {
+    // At 4 tile px per CSS px, a `from` of 2 CSS px is 8 tile px — so a body that is
+    // 8 tile px is exactly at the knee, not four times past it.
+    expect(pxSize(8, 1, { damp }, 4)).toBeCloseTo(16, 5); // 8 * fromScale
+  });
+});
+
 describe("drawBody: arrowheads", () => {
   /** A 2-point path from (0,0) to (50,0), with `arrow` packed in. */
   const edge = (arrow: number, arrowSize = 10) =>

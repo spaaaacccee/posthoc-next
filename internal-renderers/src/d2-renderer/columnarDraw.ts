@@ -4,6 +4,7 @@ import type {
   LabelSizing,
   LayerParams,
   SharedComponentStore,
+  SizeDamping,
 } from "renderer";
 import { alignOf, arrowEnd, arrowStart, baselineOf, shadeOf } from "renderer";
 import { getFillStyle } from "./primitives";
@@ -31,18 +32,20 @@ const CANVAS_BASELINES = ["alphabetic", "top", "middle", "bottom"] as const;
 const GREY = "#808080";
 
 /**
- * Circles at or below this pixel radius are splatted as a filled rect rather than
- * stroked as an ellipse.
+ * Circles at or below this **CSS** pixel radius are splatted as a filled rect rather
+ * than stroked as an ellipse.
  *
  * `beginPath` + `ellipse` + `fill` is roughly an order of magnitude dearer than one
- * `fillRect`, and it buys nothing here: at a radius of 2px a circle and a square
- * are the same handful of pixels, and at these sizes the eye is reading a density
- * cloud, not individual nodes. This is the single measure that decouples frame cost
- * from node count — a 717k-point scatter fitted to the viewport draws every node at
- * ~2px, so *all* of it takes this path.
+ * `fillRect`, and it buys nothing here: at a radius of 2px a circle and a square are
+ * the same handful of pixels, and at these sizes the eye is reading a density cloud,
+ * not individual nodes. This is the single measure that decouples frame cost from node
+ * count — a 717k-point scatter fitted to the viewport draws every node at ~2px, so
+ * *all* of it takes this path.
  *
- * 2 rather than 1 is deliberate and was measured: at 1, a fitted scatter sits just
- * above the threshold and strokes 717k ellipses.
+ * The threshold is perceptual — "small enough on screen that a square reads as a dot"
+ * — so it is a CSS size, and `drawBody` scales it by `pixelScale` to reach the tile's
+ * own pixels. A tile-pixel threshold would mean something different on every display
+ * and at every zoom.
  */
 export const SPLAT_RADIUS_PX = 2;
 
@@ -103,6 +106,22 @@ export type DrawOptions = {
    * every label.
    */
   labels?: Set<number>;
+  /**
+   * **Tile pixels per CSS pixel.** Every screen-space quantity reaching this module
+   * — size clamps, `screen` sizes, label fonts, arrowheads, the splat threshold — is
+   * stated in CSS pixels and multiplied by this to reach the tile's own units.
+   *
+   * It is not a constant, and that is the whole reason it has to be passed in. A tile
+   * rasterizes into a fixed-size bitmap that is then *stretched* over its world
+   * bounds, and `getTiles` snaps those bounds to a power of two while the camera zooms
+   * continuously — so one tile pixel is anywhere from 1 to 2 CSS pixels' worth within
+   * an octave, and jumps at each boundary. Treating tile pixels as CSS pixels (which
+   * is what omitting this does) makes a "12px" label render at 2px and pulse with
+   * zoom.
+   *
+   * Defaults to 1, which is exactly right for a caller drawing straight to the screen.
+   */
+  pixelScale?: number;
 };
 
 /**
@@ -152,11 +171,39 @@ function fontFor(size: number): string {
  * growing becomes a blob; one that keeps shrinking vanishes), and pins labels and
  * arrowheads to a fixed pixel size with `screen`.
  */
-export function pxSize(size: number, scale: number, s?: KindSizing): number {
-  let px = s?.screen ? size : size * scale;
-  if (s?.min !== undefined && px < s.min) px = s.min;
-  if (s?.max !== undefined && px > s.max) px = s.max;
+export function pxSize(size: number, scale: number, s?: KindSizing, pixelScale = 1): number {
+  // World sizes convert through `scale`; CSS sizes, the damping knees and the clamps
+  // convert through `pixelScale`. Mixing them up is what made `min`/`max` mean 4-9x
+  // less than they said — see `DrawOptions.pixelScale`.
+  let px = s?.screen ? size * pixelScale : size * scale;
+  // Damp before clamping. A clamp *pins*; damping only bends. Doing it the other way
+  // round would pin first and then bend a constant, which is not a size policy at all.
+  if (s?.damp && !s.screen) px = dampen(px, s.damp, pixelScale);
+  const min = s?.min === undefined ? undefined : s.min * pixelScale;
+  const max = s?.max === undefined ? undefined : s.max * pixelScale;
+  if (min !== undefined && px < min) px = min;
+  if (max !== undefined && px > max) px = max;
   return px;
+}
+
+/**
+ * Scale `px` (a natural, world-space size in *tile* pixels) by the damping policy.
+ *
+ * The interpolation is geometric in both axes — the scale moves linearly in log space
+ * as the size does — which is what makes the result a smooth power law rather than
+ * something with a visible kink at each knee: the drawn size ends up proportional to
+ * `natural ^ e`, where `e = 1 + log(toScale / fromScale) / log(to / from)`. At `e = 1`
+ * it is world-space; at `e = 0`, screen-space; in between, the "screen-space-ish"
+ * middle. `e < 0` would mean a body that *shrinks* as you zoom in, which is why the
+ * scale ratio should not exceed the size ratio.
+ */
+function dampen(px: number, d: SizeDamping, pixelScale: number): number {
+  const from = d.from * pixelScale;
+  const to = d.to * pixelScale;
+  if (px <= 0 || !(to > from) || from <= 0) return px;
+  const t = Math.log(px / from) / Math.log(to / from);
+  const u = t < 0 ? 0 : t > 1 ? 1 : t;
+  return px * d.fromScale * (d.toScale / d.fromScale) ** u;
 }
 
 /**
@@ -195,13 +242,34 @@ export function screenPad(store: SharedComponentStore, scale: number, o: DrawOpt
     const p = kindPad(o.sizing?.[k]);
     if (p > px) px = p;
   }
-  // Arrowheads reach past the terminal vertex, and an inline label past its
-  // body — by its offset plus however wide the text runs. 16 chars at the font
-  // size is a generous estimate; over-fetching a few bodies is far cheaper than
-  // dropping one that should have been drawn.
-  if (store.arrow) px += 32;
-  if (o.label) px += (o.label.size ?? 12) * 16 + (o.label.offset ?? 4);
-  return px / scale;
+  // An arrowhead is drawn *inward* from its terminal vertex (see `arrowInset`), so it
+  // never reaches past the path's own bbox along the line — only sideways, by half its
+  // width.
+  if (store.arrow) px += 16;
+  // An inline label runs off its body by the offset plus the width of the text. Guess
+  // that from the store's *longest* string rather than from a blanket 16 characters:
+  // the pad inflates every tile's query on all four sides, and now that it is honestly
+  // in CSS pixels a 16-char guess at 12px is ~200px a side — several times the tile.
+  if (o.label) {
+    px += maxLabelChars(store) * (o.label.size ?? 12) * CHAR_WIDTH + (o.label.offset ?? 4);
+  }
+  // `px` is CSS; `scale` is tile-px-per-world. Convert CSS -> tile -> world.
+  return (px * (o.pixelScale ?? 1)) / scale;
+}
+
+/** Rough advance width of a character, as a fraction of the font size. */
+const CHAR_WIDTH = 0.62;
+
+/** Longest string in a store, memoized — `strings` is immutable per generation. */
+const longest = new WeakMap<SharedComponentStore, number>();
+function maxLabelChars(store: SharedComponentStore): number {
+  let n = longest.get(store);
+  if (n === undefined) {
+    n = 0;
+    for (const s of store.strings) if (s.length > n) n = s.length;
+    longest.set(store, n);
+  }
+  return n;
 }
 
 /**
@@ -240,11 +308,16 @@ export function buildLabelGrid(
   t: DrawTransform,
   tile: { width: number; height: number },
   label: LabelSizing,
+  pixelScale = 1,
 ): Set<number> | undefined {
   const grid = label.grid;
   if (!grid) return undefined;
-  const cols = Math.max(1, ceil(tile.width / grid.width));
-  const rows = Math.max(1, ceil(tile.height / grid.height));
+  // The cell is a CSS-pixel budget — "one label per 64x32 of screen" — so it has to
+  // be measured against the tile in the tile's own pixels.
+  const cellW = grid.width * pixelScale;
+  const cellH = grid.height * pixelScale;
+  const cols = Math.max(1, ceil(tile.width / cellW));
+  const rows = Math.max(1, ceil(tile.height / cellH));
   // Winner per cell, and its importance. -1 = empty.
   const winner = new Int32Array(cols * rows).fill(-1);
   const best = new Float32Array(cols * rows);
@@ -254,8 +327,8 @@ export function buildLabelGrid(
     if (!store.label[i]) continue;
     const px = store.x[i]! * t.sx + t.x;
     const py = store.y[i]! * t.sy + t.y;
-    let cx = Math.floor(px / grid.width);
-    let cy = Math.floor(py / grid.height);
+    let cx = Math.floor(px / cellW);
+    let cy = Math.floor(py / cellH);
     // A body anchored just outside the tile (the query is inflated, so there are
     // some) still competes, from the edge cell it is nearest.
     cx = cx < 0 ? 0 : cx >= cols ? cols - 1 : cx;
@@ -318,13 +391,16 @@ function drawInlineLabel(
   if (!str) return;
   if (o.labels && !o.labels.has(i)) return;
   const l = o.label!;
-  const size = l.size ?? 12;
+  const k = o.pixelScale ?? 1;
+  // Font size and offset are CSS pixels; the canvas we are drawing into is measured
+  // in tile pixels.
+  const size = (l.size ?? 12) * k;
   const a = store.align?.[i] ?? 0;
   ctx.font = fontFor(size);
   ctx.fillStyle = l.color ?? GREY;
   ctx.textAlign = CANVAS_ALIGNS[alignOf(a)] ?? "left";
   ctx.textBaseline = CANVAS_BASELINES[baselineOf(a)] ?? "middle";
-  ctx.fillText(str, cx + radius + (l.offset ?? 4), cy);
+  ctx.fillText(str, cx + radius + (l.offset ?? 4) * k, cy);
 }
 
 /** Draw body `i` onto `ctx` under transform `t`. */
@@ -339,15 +415,19 @@ export function drawBody(
   const style = resolveFill(store, shadeOf(store, i, o.step), store.alpha[i]!, cache);
   const kind = store.kind[i];
   const sizing = o.sizing;
+  const k = o.pixelScale ?? 1;
 
   if (kind === CIRCLE) {
     ctx.fillStyle = style;
     const x = store.x[i]! * t.sx + t.x;
     const y = store.y[i]! * t.sy + t.y;
     const s = sizing?.circle;
-    const rx = pxSize(store.size[i]!, t.sx, s);
-    const ry = pxSize(store.size[i]!, t.sy, s);
-    if (rx <= SPLAT_RADIUS_PX && ry <= SPLAT_RADIUS_PX) {
+    const rx = pxSize(store.size[i]!, t.sx, s, k);
+    const ry = pxSize(store.size[i]!, t.sy, s, k);
+    // The splat threshold is perceptual — "small enough on *screen* that a square
+    // reads as a dot" — so it is a CSS size, converted here like any other.
+    const splat = SPLAT_RADIUS_PX * k;
+    if (rx <= splat && ry <= splat) {
       // Small enough that a square reads as a dot: splat. See SPLAT_RADIUS_PX.
       ctx.fillRect(nz(round(x - rx)), nz(round(y - ry)), ceil(rx * 2) || 1, ceil(ry * 2) || 1);
     } else {
@@ -373,7 +453,7 @@ export function drawBody(
       ctx.strokeStyle = style;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.lineWidth = ceil(pxSize(store.size[i]!, t.sx, sizing?.path)) || 1;
+      ctx.lineWidth = ceil(pxSize(store.size[i]!, t.sx, sizing?.path, k)) || 1;
       ctx.stroke();
       const a = store.arrow?.[i] ?? 0;
       if (a) drawArrows(store, i, ctx, t, from, to, a, style, o);
@@ -388,7 +468,7 @@ export function drawBody(
     if (!str) return;
     if (o.labels && !o.labels.has(i)) return;
     ctx.fillStyle = style;
-    ctx.font = fontFor(pxSize(store.size[i]!, t.sx, sizing?.text));
+    ctx.font = fontFor(pxSize(store.size[i]!, t.sx, sizing?.text, k));
     const a = store.align?.[i] ?? 0;
     ctx.textAlign = CANVAS_ALIGNS[alignOf(a)] ?? "left";
     ctx.textBaseline = CANVAS_BASELINES[baselineOf(a)] ?? "alphabetic";
@@ -402,8 +482,8 @@ export function drawBody(
     ctx.fillRect(
       ceil(x),
       ceil(y),
-      ceil(pxSize(store.size[i]!, t.sx, s)) || 1,
-      ceil(pxSize(store.size2[i]!, t.sy, s)) || 1,
+      ceil(pxSize(store.size[i]!, t.sx, s, k)) || 1,
+      ceil(pxSize(store.size2[i]!, t.sy, s, k)) || 1,
     );
     if (o.label && store.label[i]) drawInlineLabel(store, i, ctx, x, y, 0, o);
   }
@@ -430,12 +510,14 @@ function drawArrows(
 ): void {
   const n = (to - from) / 2;
   if (n < 2) return;
-  const size = store.size2[i]! || 8;
+  const k = o.pixelScale ?? 1;
+  // `size2` is the head's size in CSS pixels.
+  const size = (store.size2[i]! || 8) * k;
   // The target's own drawn radius, under the policy that will draw it. Guarded on
   // being non-zero: `pxSize(0, ...)` would return the circle policy's *minimum*, so
   // a body with no inset would silently gain one.
   const world = store.arrowInset?.[i] ?? 0;
-  const inset = world ? pxSize(world, t.sx, o.sizing?.circle) : 0;
+  const inset = world ? pxSize(world, t.sx, o.sizing?.circle, k) : 0;
   ctx.fillStyle = style;
 
   const end = arrowEnd(packed);

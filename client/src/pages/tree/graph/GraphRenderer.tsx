@@ -34,7 +34,20 @@ import type { GraphStoreResult } from "./buildGraphStore";
  */
 const TILE_RESOLUTION = 128;
 
-const tile = devicePixelRatio * 2 * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
+/**
+ * Tile bitmap size — and it is coupled to `tileSubdivision`, which is easy to miss.
+ *
+ * A tile's bitmap is stretched over its world bounds, so the pixels-per-CSS-pixel it
+ * rasterizes at is `tileResolution * 2^subdivision / paneWidth`. Subdividing harder
+ * shrinks a tile's world footprint while leaving its bitmap the same size, so it
+ * *doubles* the sampling density for free — and the viewport's `* 2` (which lands it
+ * at ~dpr for its `tileSubdivision: 2`) becomes ~2x oversampling here at 3. That is
+ * 4x the fill rate for pixels no display can show, and on the 717k-point scatter it
+ * is the difference between a splat costing 29 and 225 pixels.
+ *
+ * So the `* 2` comes off, exactly cancelling the extra subdivision.
+ */
+const tile = devicePixelRatio * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
 
 const rendererOptions: Partial<D2RendererOptions> = {
   tileSubdivision: isMobile ? 2 : 3,

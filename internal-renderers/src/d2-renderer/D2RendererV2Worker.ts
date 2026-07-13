@@ -64,6 +64,11 @@ type OpenLayer = Generation & {
 
 const MAX_TILE_CACHE = 512;
 
+/** Steps per octave that {@link D2RendererV2Worker} rounds `pixelScale` to. */
+const SCALE_QUANTA = 4;
+const quantizeScale = (v: number) =>
+  v > 0 ? 2 ** (Math.round(Math.log2(v) * SCALE_QUANTA) / SCALE_QUANTA) : 1;
+
 /** A tile's identity: its bounds. Its *size* in pixels is a property of the
  * raster, not of the tile, so it belongs in the cached value — where the
  * "already have it at this size or better" check below reads it. */
@@ -136,8 +141,20 @@ export class D2RendererV2Worker extends EventEmitter<
     this.#invalidate();
   }
 
-  setFrustum(frustum: Bounds) {
+  /**
+   * CSS pixels per world unit, from the camera. See `D2RendererV2.handleFrustumChange`.
+   *
+   * With it, `t.sx / #worldToCss` is the tile pixels in one CSS pixel — the factor
+   * that turns every screen-space quantity in {@link DrawOptions} (size clamps, label
+   * font, arrowheads, the splat threshold) into the tile's own units. Without it the
+   * draw path's "pixels" were tile pixels: 4-9x a CSS pixel here, and *pulsing* with
+   * zoom, because a tile's world size snaps to powers of two and the camera does not.
+   */
+  #worldToCss = 1;
+
+  setFrustum(frustum: Bounds, worldToCss = 1) {
     this.#frustum = frustum;
+    this.#worldToCss = worldToCss > 0 ? worldToCss : 1;
     this.#getRenderQueue()();
   }
 
@@ -412,6 +429,20 @@ export class D2RendererV2Worker extends EventEmitter<
     // can decide how far past the tile to look. See `screenPad`.
     const t = columnarDrawTransform(bounds, tile);
 
+    // Tile pixels per CSS pixel. `t.sx` is tile-px-per-world; `#worldToCss` is
+    // css-px-per-world; the quotient converts one to the other. Everything the draw
+    // path calls a "pixel" is a CSS pixel, and this is what makes that true.
+    //
+    // **Quantized, deliberately.** The exact value slides continuously with the
+    // camera, and it feeds the tile's pixels — so an exact one would change the
+    // content hash on every frame of a zoom and re-rasterize (and re-transmit) the
+    // whole frustum each time. Today a zoom *within* an octave costs nothing at all:
+    // tile bounds are world-anchored, so the GPU just scales the sprites. Rounding to
+    // steps of 2^(1/4) keeps almost all of that — a repaint 4x per octave instead of
+    // 60x a second — at the price of a screen-space size drifting by at most 19%
+    // between steps, against the 100% it drifts today.
+    const pixelScale = quantizeScale(t.sx / this.#worldToCss);
+
     // Per layer: either a cached raster (step-invariant layers only — a map's
     // pixels in this tile don't depend on the playhead) or the visible bodies to
     // draw, plus that layer's own content hash.
@@ -421,7 +452,10 @@ export class D2RendererV2Worker extends EventEmitter<
     // that array is viable — `push(...indices)` overflows the argument stack.
     // Keyed by size as well as position: the dynamic-resolution ticker flips the
     // tile size between a couple of discrete values, and both need to stay warm.
-    const layerKey = `${key}:${tile.width}x${tile.height}`;
+    // `pixelScale` is part of the key, not just the hash: an invariant layer's cached
+    // raster is returned *without* recomputing its hash, so a scale change would
+    // otherwise serve pixels drawn for a different zoom.
+    const layerKey = `${key}:${tile.width}x${tile.height}:${pixelScale.toFixed(3)}`;
 
     const perLayer = layers.map((l) => {
       const cached = l.invariant ? l.tiles.get(layerKey) : undefined;
@@ -434,6 +468,7 @@ export class D2RendererV2Worker extends EventEmitter<
         step: this.#step,
         sizing: l.params.sizing,
         label: l.params.label,
+        pixelScale,
       };
       const pad = screenPad(l.store, t.sx, opts);
       const indices = queryVisible(
@@ -449,6 +484,9 @@ export class D2RendererV2Worker extends EventEmitter<
       };
       mix(l.generation);
       mix(indices.length);
+      // The scale the tile's pixels were drawn at. Every screen-space size resolves
+      // through it, so two frames at different zooms are different content.
+      mix(Math.round(pixelScale * 1024));
       if (l.store.ramps?.length) {
         // Fold each ramped body's *bucket*, not the raw step. That distinction is
         // the whole value of the ramp design: a tile whose ramped bodies have all
@@ -521,7 +559,7 @@ export class D2RendererV2Worker extends EventEmitter<
       // inputs (the indices, the transform, the label params) are all already in
       // the tile's hash, so it needs no cache key of its own.
       if (opts.label?.grid) {
-        opts.labels = buildLabelGrid(l.store, indices, t, tile, opts.label);
+        opts.labels = buildLabelGrid(l.store, indices, t, tile, opts.label, pixelScale);
       }
 
       if (l.invariant && indices.length >= MIN_BODIES_TO_CACHE) {

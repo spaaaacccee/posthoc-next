@@ -19,7 +19,9 @@ import type { Trace } from "protocol/Trace-v140";
 import { buildGraphStore } from "../buildGraphStore";
 
 /** What `GraphRenderer` actually renders under. Both values change the answer. */
-const TILE = { width: 512, height: 512 }; // devicePixelRatio(2) * 2 * TILE_RESOLUTION(128)
+const TILE = { width: 256, height: 256 }; // devicePixelRatio(2) * TILE_RESOLUTION(128)
+const SCREEN = 1130; // css px of the graph pane
+const quant = (v: number) => 2 ** (Math.round(Math.log2(v) * 4) / 4);
 const SUBDIVISION = 3;
 
 /**
@@ -91,10 +93,14 @@ suite("scale: 717k events, plot mode", () => {
     const last = store.total - 1;
 
     const t = columnarDrawTransform(tiles[0]!.bounds, TILE);
+    // Tile pixels per CSS pixel — the factor every screen-space size resolves through.
+    // Modelling it is the point: the clamps are CSS pixels, the tile is not.
+    const pixelScale = quant(t.sx / (SCREEN / (frustum.right - frustum.left)));
     const opts: DrawOptions = {
       step: last,
       sizing: result.params.sizing,
       label: result.params.label,
+      pixelScale,
     };
 
     let draws = 0;
@@ -125,7 +131,9 @@ suite("scale: 717k events, plot mode", () => {
     // 20 world units, this test asserted about 2, and the clamp turned the real
     // value into a 20px ellipse per point, 717,447 times a frame.
     const sizing = result.params.sizing!.circle;
-    const nodeRadiusPx = pxSize(store.size[result.nodeOffset]!, t.sx, sizing);
+    // In CSS pixels — what the eye actually sees, and what the splat threshold means.
+    const nodeRadiusPx =
+      pxSize(store.size[result.nodeOffset]!, t.sx, sizing, pixelScale) / pixelScale;
 
     // How many tiles the average body is drawn into. A body's indexed box is derived
     // from its `size`, so an oversized radius doesn't just make each draw dearer —
@@ -161,7 +169,9 @@ suite("scale: 717k events, plot mode", () => {
     // And it draws each of them about *once*. This is the half that the radius check
     // alone misses: the radius sets the cost of one draw, the fan-out sets how many
     // draws there are, and a bloated `size` inflates both at once.
-    expect(fanout).toBeLessThan(1.2);
+    // Generous, deliberately: this guards against the *12.9x* blowup an oversized
+    // radius caused, not against a few percent of tile-edge straddling.
+    expect(fanout).toBeLessThan(1.4);
   }, 120_000);
 
   it("returns only what is on screen as you zoom in", () => {
