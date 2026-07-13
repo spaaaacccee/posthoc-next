@@ -26,14 +26,24 @@ type DynamicResolutionOptions = {
   /**
    * Turn the feedback loop off entirely, pinning tiles at `tileResolution`.
    *
-   * Worth doing for any layer whose tiles are cached against a *content* hash
-   * rather than re-rasterized every frame — a graph, whose colour ramps make its
-   * tiles stable between bucket crossings. Tile size is part of every cache key
-   * here, and `setTileResolution` clears the tile cache outright, so a ticker that
-   * flips the size every 500ms under load would evict exactly the cache the ramps
-   * exist to keep warm, twice a second, for the whole of a scrub. The map view,
-   * which re-rasterizes its trace layer every step anyway, has much less to lose
-   * and keeps it.
+   * **Both callers now set this.** Tile size is part of every cache key here, and it
+   * is the one thing that forces a tile's GPU texture to be *reallocated* rather than
+   * blitted into — so a ticker that flips it every 500ms under load is expensive in
+   * three places at once. It clears the workers' tile caches (`setTileResolution`
+   * does so outright), it re-rasterizes every visible tile, and it reallocates every
+   * tile texture on the GPU. All of that, twice a second, for the whole of a scrub —
+   * which is exactly the sustained load that trips it.
+   *
+   * The graph was always the clearer case: its colour ramps keep tiles stable between
+   * bucket crossings, so the ticker was evicting precisely the cache the ramps exist
+   * to keep warm. The viewport looked like it had less to lose, because it
+   * re-rasterizes its trace layer every step regardless — but counting the GL calls
+   * showed it paying ~150 full texture reallocations over a 12s scrub, all of it spent
+   * to *lower* the resolution of a view that was not dropping frames.
+   *
+   * Left as an option rather than deleted: the loop is sound, and a genuinely
+   * fill-rate-bound view (a huge dense map on a weak GPU) could still want it. But it
+   * should be switched on deliberately, against a measurement, and not by default.
    */
   enabled?: boolean;
   intervalMs: number;

@@ -30,12 +30,27 @@ function tileHash(bounds: Bounds) {
 /**
  * Bitmap tile sprite, positioned in world space.
  *
- * A tile **owns its texture**. `PIXI.Texture.from(bitmap)` mints a fresh
- * `BaseTexture` every call (PIXI can't cache-key an `ImageBitmap`), and PIXI
- * keeps uploaded base textures alive in `renderer.texture.managedTextures`, so
- * nothing is reclaimed by GC. Every texture this tile displaces — and every one
- * it declines — must therefore be destroyed explicitly, or a scrub leaks a
- * 256² GPU texture per tile per frame.
+ * A tile **owns one `TextureSource` for its whole life** and re-uploads into it.
+ * It does not mint a `Texture` per update, and that distinction is the difference
+ * between a blit and a reallocation.
+ *
+ * PIXI caches a source's `GlTexture` on the source, and `glUploadImageResource`
+ * only calls `texImage2D` — allocating fresh GPU storage — when the incoming size
+ * differs from what that `GlTexture` already holds. Hand it the *same* source at
+ * the *same* size and it takes its `texSubImage2D` branch instead, blitting into
+ * storage that already exists. `Texture.from(bitmap)` cannot get there: PIXI can't
+ * cache-key an `ImageBitmap`, so every call mints a new source with no `GlTexture`,
+ * which means `gl.createTexture()` + a full `texImage2D` on upload and a
+ * `gl.deleteTexture()` when the displaced one is destroyed. A scrub dirtying ~20
+ * tiles at 24Hz was churning ~500 GPU texture allocations *per second* — the same
+ * upload bandwidth as a blit, for a great deal of driver work and heap churn.
+ *
+ * A resize is still handled, and still correct: `TextureSource.update()` calls
+ * `resize()`, which no-ops at an unchanged size but at a changed one bumps the
+ * resource id and emits `resize` — which forces the one reallocation that a genuine
+ * size change needs, and which `Texture` is itself listening for so it re-derives
+ * its own extent. That is the dynamic-resolution ticker flipping tiles between full
+ * and half size, and it is rare (twice a second, at worst) rather than per-frame.
  */
 class Tile extends PIXI.Sprite {
   static age: number = 0;
@@ -49,43 +64,76 @@ class Tile extends PIXI.Sprite {
   }
   /** Whether a worker has rasterized this tile's current content. */
   resolved: boolean = false;
-  #update(texture: PIXI.Texture, hash: string) {
-    const prev = this.texture;
-    const scale = {
-      x: (this.bounds.right - this.bounds.left) / texture.width,
-      y: (this.bounds.bottom - this.bounds.top) / texture.height,
-    };
-    this.texture = texture;
-    this.setTransform(this.bounds.left, this.bounds.top, scale.x, scale.y);
-    this.touch();
-    this.hash = hash;
-    // `super(texture)` already assigned the same texture on the ctor path.
-    if (prev && prev !== texture && prev !== PIXI.Texture.EMPTY) prev.destroy(true);
+
+  /**
+   * The bitmap currently backing the texture.
+   *
+   * Held only so the one it displaces can be `close()`d. An `ImageBitmap` owns
+   * off-heap pixels that GC reclaims lazily, and a scrub mints one per dirty tile
+   * per frame — so leaving them to the collector means holding megabytes of decoded
+   * bitmap that the GPU already has a copy of.
+   */
+  #bitmap: ImageBitmap;
+
+  /** Stretch the bitmap over the tile's world extent. */
+  #fit() {
+    const { worldBounds: b, texture } = this;
+    this.position.set(b.left, b.top);
+    this.scale.set((b.right - b.left) / texture.width, (b.bottom - b.top) / texture.height);
   }
-  reuse(texture: PIXI.Texture, hash: string) {
+
+  #upload(bitmap: ImageBitmap, hash: string) {
+    const prev = this.#bitmap;
+    this.#bitmap = bitmap;
+    this.texture.source.resource = bitmap;
+    this.texture.source.update();
+    // After `update()`, not before: a size change resizes the source, and the texture
+    // only learns its new extent from the `resize` it fires.
+    this.#fit();
+    this.hash = hash;
+    this.touch();
+    // Safe to release the *displaced* bitmap, not the current one: PIXI uploads lazily,
+    // at the next render, so `bitmap` has to outlive this call. `prev` does not — it has
+    // either been uploaded already, or been superseded before it ever was.
+    if (prev !== bitmap) prev.close();
+  }
+
+  reuse(bitmap: ImageBitmap, hash: string) {
     if (
       this.hash === hash &&
-      this.texture.width * this.texture.height > texture.width * texture.height
+      this.texture.width * this.texture.height > bitmap.width * bitmap.height
     ) {
-      // Keeping the higher-resolution texture we already have — but the caller
-      // minted this one for us, so it's ours to dispose of.
-      texture.destroy(true);
+      // Keeping the higher-resolution bitmap we already have — but the worker
+      // transferred this one to us, so it's ours to release.
+      bitmap.close();
       return;
     }
-    this.#update(texture, hash);
+    this.#upload(bitmap, hash);
   }
+
   override destroy() {
-    super.destroy({ texture: true, baseTexture: true });
+    super.destroy({ texture: true, textureSource: true });
+    // After, not before: the source is what holds this bitmap, so let PIXI let go of it first.
+    this.#bitmap.close();
   }
+
   constructor(
-    texture: PIXI.Texture,
-    public bounds: Bounds,
+    bitmap: ImageBitmap,
+    /** World-space extent. Not `bounds` — PIXI v8 defines that as a getter on
+     * `ViewContainer`, and assigning over it throws. */
+    public worldBounds: Bounds,
     public key: string,
-    public hash?: string,
+    public hash: string = nanoid(),
   ) {
-    super(texture);
-    this.name = this.key;
-    this.#update(texture, hash ?? nanoid());
+    // `skipCache`, deliberately. `Texture.from` otherwise registers the texture in the
+    // global asset `Cache` keyed by the resource — and the key is an `ImageBitmap`, so
+    // it can never be hit, only inserted into and (on destroy) removed from. This is
+    // the one source this tile will ever have; nothing else may share it, because
+    // `#upload` mutates it in place.
+    super(PIXI.Texture.from(bitmap, true));
+    this.label = key;
+    this.#bitmap = bitmap;
+    this.#fit();
   }
 }
 
@@ -125,7 +173,7 @@ type Layer = {
  * no per-renderer rbush copy.
  */
 export class D2RendererV2 extends D2RendererBase {
-  declare protected app?: PIXI.Application<HTMLCanvasElement>;
+  declare protected app?: PIXI.Application;
   protected options: D2RendererOptions = defaultD2RendererOptions;
 
   #tiles?: PIXI.Container<Tile>;
@@ -140,8 +188,8 @@ export class D2RendererV2 extends D2RendererBase {
   /** Handles whose index worker 0 is currently packing → the store it's for. */
   #pendingIndex = new Map<SourceHandle, SharedComponentStore>();
 
-  protected override setupPixi(o: D2RendererOptions) {
-    super.setupPixi(o);
+  protected override async setupPixi(o: D2RendererOptions) {
+    await super.setupPixi(o);
     if (!this.viewport) return;
     this.#tiles = new PIXI.Container();
     this.#tiles.sortableChildren = true;
@@ -192,10 +240,10 @@ export class D2RendererV2 extends D2RendererBase {
     });
   }
 
-  setup(options: Partial<D2RendererOptions>) {
+  override async setup(options: Partial<D2RendererOptions>) {
     // Ahead of `options`, not after it: this is a default v2 chooses for itself, and a
     // caller that passes `zoomSmoothing` still wins.
-    super.setup({ zoomSmoothing: defaultZoomSmoothing, ...options });
+    await super.setup({ zoomSmoothing: defaultZoomSmoothing, ...options });
     this.#handleWorkerChange(this.options);
   }
 
@@ -366,7 +414,10 @@ export class D2RendererV2 extends D2RendererBase {
     let frames = 0;
     let cdt = 0;
     let scale = minScale;
-    this.app!.ticker.add((dt) => {
+    // PIXI v8 hands the ticker itself to the callback, where v7 passed the delta
+    // directly. `deltaTime` is that same scaled-frame delta (~1 at the target rate),
+    // so the feedback loop's thresholds still mean what they did.
+    this.app!.ticker.add((ticker) => {
       const { tileResolution } = this.options;
       if (!(frames % targetFrames)) {
         const adt = cdt / targetFrames;
@@ -381,7 +432,7 @@ export class D2RendererV2 extends D2RendererBase {
         );
         cdt = 0;
       }
-      cdt += dt;
+      cdt += ticker.deltaTime;
       frames++;
     });
   }
@@ -420,18 +471,19 @@ export class D2RendererV2 extends D2RendererBase {
   }
 
   #handleUpdate({ bounds, bitmap, hash: nextHash }: D2V2WorkerEvents["update"]) {
-    const texture = bitmap ? PIXI.Texture.from(bitmap) : undefined;
-    this.#addToWorld(bounds, nextHash, texture);
+    this.#addToWorld(bounds, nextHash, bitmap);
   }
 
-  #addToWorld(bounds: Bounds, nextHash: string, texture?: PIXI.Texture) {
+  // Takes the raw bitmap, not a `Texture`: a tile mints its texture once, in its
+  // constructor, and thereafter re-uploads into the source it already owns. See {@link Tile}.
+  #addToWorld(bounds: Bounds, nextHash: string, bitmap?: ImageBitmap) {
     if (!this.viewport) return;
     const tileKey = tileHash(bounds);
     let tile = this.#tileIndex.get(tileKey);
-    if (texture) {
-      if (tile) tile.reuse(texture, nextHash);
+    if (bitmap) {
+      if (tile) tile.reuse(bitmap, nextHash);
       else {
-        tile = new Tile(texture, bounds, tileKey, nextHash);
+        tile = new Tile(bitmap, bounds, tileKey, nextHash);
         this.#tiles!.addChild(tile);
         this.#tileIndex.set(tileKey, tile);
         this.#evictTiles();
@@ -468,7 +520,7 @@ export class D2RendererV2 extends D2RendererBase {
       if (!oldest) break;
       this.#tileIndex.delete(oldest.key);
       this.#tiles?.removeChild(oldest);
-      dropped.push(oldest.bounds);
+      dropped.push(oldest.worldBounds);
       oldest.destroy();
     }
     if (dropped.length) this.#dropTiles(dropped);
@@ -490,10 +542,9 @@ export class D2RendererV2 extends D2RendererBase {
     const { tiles } = getTiles(this.viewport, tileSubdivision, false);
     const px = this.getPx();
     this.#grid?.clear();
-    this.#grid?.lineStyle(1 * px, accentColor, 0.5);
-    this.#grid?.beginFill(accentColor, 0.05);
     forEach(this.#tiles?.children, (t) => (t.zIndex = 0));
     let numResolved = 0;
+    let placeholders = 0;
     for (const { bounds: b } of tiles) {
       const t = this.#tileIndex.get(tileHash(b));
       // On screen — so, in use. Keeps the frustum out of reach of the evictor,
@@ -504,7 +555,18 @@ export class D2RendererV2 extends D2RendererBase {
         t.visible = true;
         numResolved++;
       }
-      if (!t) this.#grid?.drawRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+      if (!t) {
+        this.#grid?.rect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        placeholders++;
+      }
+    }
+    // v8's Graphics is path-then-paint: queue every placeholder rect, then paint the
+    // lot in one pass (`stroke` straight after `fill` re-uses the same path). Skipped
+    // entirely when nothing is missing — the common case, and painting an empty path
+    // would still dirty the geometry and force a rebuild every frame.
+    if (placeholders) {
+      this.#grid?.fill({ color: accentColor, alpha: 0.05 });
+      this.#grid?.stroke({ width: 1 * px, color: accentColor, alpha: 0.5 });
     }
     if (numResolved === tiles.length) {
       forEach(this.#tiles?.children, (t) => {
@@ -533,15 +595,17 @@ export class D2RendererV2 extends D2RendererBase {
     const { x, y } = this.viewport.toWorld(e.globalX, e.globalY);
     const point = { left: x, top: y, right: x + Number.MIN_VALUE, bottom: y + Number.MIN_VALUE };
     this.overlay.clear();
-    this.overlay.lineStyle(2 * px, accentColor, 0.5);
+    let hits = 0;
     for (const layer of this.#layers.values()) {
       if (!layer.fb) continue;
       // Unsorted: hit-testing doesn't care about draw order.
       for (const i of queryVisible(layer.store, layer.fb, point, this.#step, { sort: false })) {
         const [minX, minY, maxX, maxY] = bodyBounds(layer.store, i);
-        this.overlay.drawRect(minX, minY, maxX - minX, maxY - minY);
+        this.overlay.rect(minX, minY, maxX - minX, maxY - minY);
+        hits++;
       }
     }
+    if (hits) this.overlay.stroke({ width: 2 * px, color: accentColor, alpha: 0.5 });
   }
 }
 

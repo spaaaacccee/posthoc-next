@@ -28,20 +28,26 @@ class Elem extends PIXI.Sprite {
   #scale: number = 1;
   #maxScale: number = 1;
   constructor(
-    public bounds: Bounds,
+    /** World-space extent. Not `bounds` — PIXI v8 defines that as a getter on
+     * `ViewContainer`, and assigning over it throws. */
+    public worldBounds: Bounds,
     private bodies: ReturnType<D2RendererBase["makeBodies"]>,
     scale: number
   ) {
     const maxScale =
       CANVAS_MAXSIZE /
-      max(bounds.right - bounds.left, bounds.bottom - bounds.top, 1);
-    super(getTexture(bounds, bodies, getClampedScale(scale, maxScale)));
-    this.rerender(scale, bounds, bodies, maxScale);
+      max(
+        worldBounds.right - worldBounds.left,
+        worldBounds.bottom - worldBounds.top,
+        1
+      );
+    super(getTexture(worldBounds, bodies, getClampedScale(scale, maxScale)));
+    this.rerender(scale, worldBounds, bodies, maxScale);
     this.#maxScale = maxScale;
   }
   rerender(
     size: number,
-    bounds = this.bounds,
+    bounds = this.worldBounds,
     bodies = this.bodies,
     maxScale = this.#maxScale
   ) {
@@ -49,7 +55,8 @@ class Elem extends PIXI.Sprite {
     if (scale === this.#scale) return;
     const texture = getTexture(bounds, bodies, scale);
     this.texture = texture;
-    this.setTransform(bounds.left, bounds.top, 1 / scale, 1 / scale);
+    this.position.set(bounds.left, bounds.top);
+    this.scale.set(1 / scale, 1 / scale);
     this.#scale = scale;
   }
 }
@@ -77,8 +84,8 @@ function getTexture(
 export class D2MinimalRenderer extends D2RendererBase {
   #elements?: PIXI.Container<Elem>;
   #scale: number = 50;
-  protected override setupPixi(options: D2RendererOptions) {
-    super.setupPixi(options);
+  protected override async setupPixi(options: D2RendererOptions) {
+    await super.setupPixi(options);
     if (!this.viewport) return;
     this.#elements = new PIXI.Container();
     this.viewport.addChild(this.#elements);
@@ -110,7 +117,7 @@ export class D2MinimalRenderer extends D2RendererBase {
     const scale = 1 / this.getPx();
     const { left, right, top, bottom } = this.viewport;
     for (const child of this.#elements.children) {
-      if (intersect(child.bounds, { left, right, top, bottom })) {
+      if (intersect(child.worldBounds, { left, right, top, bottom })) {
         child.rerender(scale);
       } else {
         child.rerender(1);

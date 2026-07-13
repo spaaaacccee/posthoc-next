@@ -4,9 +4,9 @@ import { StatusBanner } from "components/generic/StatusBanner";
 import { RendererProps, SelectEvent } from "components/renderer/Renderer";
 import { RenderLayer } from "layers/RenderLayer";
 import { clamp } from "es-toolkit";
-import { find, floor, get, some } from "es-toolkit/compat";
+import { defaultD2RendererOptions } from "internal-renderers/src/d2-renderer/D2RendererOptions";
+import { find, get } from "es-toolkit/compat";
 import { nanoid } from "nanoid";
-import { isStepsLayer } from "pages/steps/StepsLayer";
 import { Size } from "protocol";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useDebounce } from "react-use";
@@ -20,16 +20,52 @@ import { useOne } from "slices/useOne";
 
 const TILE_RESOLUTION = 128;
 
-const tileSize = (playing: boolean = false) =>
-  (playing ? devicePixelRatio * 1.5 : devicePixelRatio * 2) *
-  TILE_RESOLUTION *
-  (isMobile ? 0.25 : 1);
+/**
+ * Tile bitmap size — **one size, for the life of the renderer.** Nothing here may
+ * change it at runtime, and that is the point.
+ *
+ * A tile's size is not a free knob. It is part of every cache key downstream, and it
+ * is the one thing that forces a tile's GPU texture to be *reallocated* rather than
+ * blitted into: a tile owns a single `TextureSource` for life, and PIXI's uploader
+ * takes its cheap `texSubImage2D` path exactly when the incoming size matches what
+ * that source already holds. Resize a tile and you re-rasterize it, evict it from the
+ * workers' caches, and reallocate its texture on the GPU. Resize *every* tile and you
+ * do that to the whole frustum.
+ *
+ * Two mechanisms used to do precisely that, and both are now gone:
+ *
+ * - The `dynamicResolution` ticker, which halved tile size under load — i.e. under
+ *   exactly the sustained load of a scrub — and so churned the frustum every 500ms for
+ *   the whole of a playback. Measured at ~150 full texture reallocations over a 12s
+ *   scrub, all of it spent to *lower* the resolution of a viewport that was not
+ *   dropping frames. Turned off below; see {@link DynamicResolutionOptions.enabled}.
+ *
+ * - A `playing` swap, which dropped the multiplier from 2 to 1.5 while the playhead
+ *   ran. Cheaper than the ticker (it fired twice per playback, not continuously) but
+ *   still ~98 reallocations over the same scrub, since each transition resized every
+ *   tile on screen.
+ *
+ * The multiplier settles at the playback value, **1.5, not 2** — because that was the
+ * more correct of the two all along. The bitmap is stretched over the tile's world
+ * bounds, so the density it rasterizes at is `tileResolution · 2^(subdivision+0.5) /
+ * paneWidth`; at `tileSubdivision: 2` that lands 1:1 with the display on a ~1080px
+ * pane at 1.5, and oversamples by ~1.4x (so ~2x the fill rate) at 2, for detail no
+ * display can resolve. Pinning at 1.5 therefore costs nothing that was visible and
+ * makes the idle viewport cheaper than it has ever been, while leaving playback exactly
+ * as expensive as it already was.
+ *
+ * Note the density still rides on the pane's width, which is a separate, pre-existing
+ * wrinkle: this constant is tuned for a pane around 1080px, and a much wider one
+ * under-samples. Deriving `tileResolution` from `screenSize` would fix that properly.
+ */
+const tile = devicePixelRatio * 1.5 * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
 
 const rendererOptions = {
   tileSubdivision: isMobile ? 1 : 2,
-  // Use 25% of available CPUs
-  workerCount: clamp(floor(navigator.hardwareConcurrency / 4), 1, 12),
-  tileResolution: { width: tileSize(), height: tileSize() },
+  // Use almost all CPUs
+  workerCount: clamp(navigator.hardwareConcurrency - 1, 1, 12),
+  tileResolution: { width: tile, height: tile },
+  dynamicResolution: { ...defaultD2RendererOptions.dynamicResolution, enabled: false },
 };
 
 const TraceRendererContext = createContext<{ renderer?: Renderer }>({});
@@ -49,30 +85,51 @@ function useRenderer(renderer?: string, { width, height }: Partial<Size> = {}) {
     if (ref && renderer) {
       const entry = find(renderers, (r) => r.renderer.meta.id === renderer);
       if (entry) {
-        try {
-          const instance = new entry.renderer.constructor();
-          instance.setup({
+        const instance = new entry.renderer.constructor();
+        // `setup` is async — PIXI v8 builds its renderer, and so its canvas, in an async
+        // `init` — so what used to be a thrown setup error is now a rejection, and the
+        // effect can be torn down while setup is still in flight. `disposed` stops us
+        // mounting a renderer nobody is waiting for any more, and `mounted` keeps the
+        // teardown from trying to remove a view that was never appended.
+        let disposed = false;
+        let mounted = false;
+        const ready = instance
+          .setup({
             ...rendererOptions,
             screenSize: { width: 256, height: 256 },
             backgroundColor: theme.palette.background.paper,
             accentColor: theme.palette.primary.main,
-          });
-          ref.append(instance.getView()!);
-          setInstance(instance);
-          setError("");
-          return () => {
-            try {
-              ref.removeChild(instance.getView()!);
+          })
+          .then(
+            () => {
+              if (disposed) return;
+              ref.append(instance.getView()!);
+              mounted = true;
+              setInstance(instance);
+              setError("");
+            },
+            (e) => {
+              if (disposed) return;
+              setError(`${entry.renderer.meta.name}: ${get(e, "message")}`);
               setInstance(undefined);
-            } catch (e) {
-              console.warn(e);
+            },
+          );
+        return () => {
+          disposed = true;
+          setInstance(undefined);
+          // Deferred until setup settles: destroying a half-initialised Application
+          // throws, and until then there is nothing mounted to take down.
+          void ready.then(() => {
+            if (mounted) {
+              try {
+                ref.removeChild(instance.getView()!);
+              } catch (e) {
+                console.warn(e);
+              }
             }
             instance.destroy();
-          };
-        } catch (e) {
-          setError(`${entry.renderer.meta.name}: ${get(e, "message")}`);
-          setInstance(undefined);
-        }
+          });
+        };
       }
     }
   }, [ref, theme.palette.primary.main, theme.palette.background.paper, renderer, renderers]);
@@ -130,17 +187,9 @@ function TraceRendererStatusBanner() {
 
 const VIEWPORT_PAGE_DESCRIPTION = "When you create a layer, you'll see it visualised here.";
 
-function useAnyLayerPlaying() {
-  return useOne(slice.layers, (l) =>
-    some(l, (l) => isStepsLayer(l) && l.source?.playback === "playing"),
-  );
-}
-
 export function TraceRenderer({ width, height, renderer, rendererRef, layers }: RendererProps) {
   const key = useMemo(() => nanoid(), []);
   const { instance, error, setRef } = useRenderer(renderer, { width, height });
-
-  const playing = useAnyLayerPlaying();
 
   const [selection, setSelection] = useState<SelectEvent>();
 
@@ -176,15 +225,6 @@ export function TraceRenderer({ width, height, renderer, rendererRef, layers }: 
     slice.rendererCapabilities.mount(key, typeof instance.load === "function");
     return () => slice.rendererCapabilities.unmount(key);
   }, [key, instance]);
-
-  useEffect(() => {
-    if (instance) {
-      instance.setOptions({
-        // TODO: This is a 2D renderer specific setting
-        tileResolution: { width: tileSize(playing), height: tileSize(playing) },
-      } as any);
-    }
-  }, [instance, playing]);
 
   return (
     <>

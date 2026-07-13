@@ -55,7 +55,13 @@ export interface Renderer<
   V extends CompiledComponent<any, any> = CompiledComponent<string, {}>,
   M = Meta,
 > extends EventEmitter<U> {
-  setup(options: Partial<T>): void;
+  /**
+   * Build the renderer against a host. Asynchronous because a GPU-backed renderer
+   * cannot hand back a canvas synchronously (PIXI v8 creates its renderer in an async
+   * `init`), so `getView()` returns nothing until this settles — await it before
+   * mounting the view.
+   */
+  setup(options: Partial<T>): Promise<void>;
   destroy(): void;
   setOptions(options: Partial<T>): void;
   add(components: ComponentEntry<V>[]): RemoveElementCallback;

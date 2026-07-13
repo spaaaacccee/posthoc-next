@@ -23,9 +23,9 @@ class Tile extends PIXI.Sprite {
   age: number = Tile.age++;
   #update(texture: PIXI.Texture, hash: string, isError: boolean) {
     const bounds = {
-      ...this.bounds,
-      width: this.bounds.right - this.bounds.left,
-      height: this.bounds.bottom - this.bounds.top,
+      ...this.worldBounds,
+      width: this.worldBounds.right - this.worldBounds.left,
+      height: this.worldBounds.bottom - this.worldBounds.top,
     };
     const scale = {
       x: bounds.width / texture.width,
@@ -33,7 +33,8 @@ class Tile extends PIXI.Sprite {
     };
     this.isError = isError;
     this.texture = texture;
-    this.setTransform(this.bounds.left, this.bounds.top, scale.x, scale.y);
+    this.position.set(this.worldBounds.left, this.worldBounds.top);
+    this.scale.set(scale.x, scale.y);
     this.age = Tile.age++;
     this.hash = hash;
   }
@@ -50,19 +51,21 @@ class Tile extends PIXI.Sprite {
   }
   constructor(
     texture: PIXI.Texture,
-    public bounds: Bounds,
+    /** World-space extent. Not `bounds` — PIXI v8 defines that as a getter on
+     * `ViewContainer`, and assigning over it throws. */
+    public worldBounds: Bounds,
     public key: string,
     public hash?: string,
     public isError: boolean = false,
   ) {
     super(texture);
-    this.name = this.key;
+    this.label = this.key;
     this.#update(texture, hash ?? nanoid(), isError);
   }
 }
 
 export class D2Renderer extends D2RendererBase {
-  declare protected app?: PIXI.Application<HTMLCanvasElement>;
+  declare protected app?: PIXI.Application;
   protected options: D2RendererOptions = defaultD2RendererOptions;
   protected system: Bush<CompiledD2IntrinsicComponent> = new Bush(9);
   declare protected viewport?: Viewport;
@@ -73,8 +76,8 @@ export class D2Renderer extends D2RendererBase {
   #workers: D2RendererWorkerAdapter[] = [];
   #grid?: PIXI.Graphics;
 
-  protected override setupPixi(o: D2RendererOptions) {
-    super.setupPixi(o);
+  protected override async setupPixi(o: D2RendererOptions) {
+    await super.setupPixi(o);
     if (!this.viewport) return;
 
     this.#tiles = new PIXI.Container();
@@ -86,8 +89,8 @@ export class D2Renderer extends D2RendererBase {
 
     this.#startDynamicResolution();
   }
-  setup(options: Partial<D2RendererOptions>) {
-    super.setup(options);
+  override async setup(options: Partial<D2RendererOptions>) {
+    await super.setup(options);
     this.#handleWorkerChange(this.options);
   }
 
@@ -135,12 +138,19 @@ export class D2Renderer extends D2RendererBase {
 
   #startDynamicResolution() {
     const { dynamicResolution } = this.options;
+    // Off: leave tiles pinned at `tileResolution`. v2 has always honoured this; v1 did
+    // not, which made the flag a lie for anyone who switched the viewport to "Pixel
+    // (legacy)" — the ticker kept flipping tile size underneath them. Guarded here
+    // rather than by setting minScale === maxScale, which would still post a
+    // setTileResolution to every worker on every tick for the life of the renderer.
+    if (dynamicResolution.enabled === false) return;
     const { dtMax, dtMin, increment, intervalMs, maxScale, minScale } = dynamicResolution;
     const targetFrames = floor(PIXI.Ticker.targetFPMS * intervalMs);
     let frames = 0;
     let cdt = 0;
     let scale = 1;
-    this.app!.ticker.add((dt) => {
+    // v8 passes the ticker, not the delta; `deltaTime` is v7's `dt`.
+    this.app!.ticker.add((ticker) => {
       const { tileResolution } = this.options;
       if (!(frames % targetFrames)) {
         const adt = cdt / targetFrames;
@@ -159,7 +169,7 @@ export class D2Renderer extends D2RendererBase {
         });
         cdt = 0;
       }
-      cdt += dt;
+      cdt += ticker.deltaTime;
       frames++;
     });
   }
@@ -206,10 +216,9 @@ export class D2Renderer extends D2RendererBase {
     const { tiles } = getTiles(this.viewport, tileSubdivision);
     const px = this.getPx();
     this.#grid?.clear();
-    this.#grid?.lineStyle(1 * px, accentColor, 0.5);
-    this.#grid?.beginFill(accentColor, 0.05);
     forEach(this.#tiles?.children, (t) => (t.zIndex = 0));
     let numResolved = 0;
+    let placeholders = 0;
     for (const { bounds: b } of tiles) {
       const key = tileHash(b);
       const t = find(this.#tiles?.children, (c) => c.key === key);
@@ -220,8 +229,14 @@ export class D2Renderer extends D2RendererBase {
         numResolved++;
       }
       if (!t) {
-        this.#grid?.drawRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        this.#grid?.rect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        placeholders++;
       }
+    }
+    // v8's Graphics is path-then-paint: queue the placeholder rects, paint once.
+    if (placeholders) {
+      this.#grid?.fill({ color: accentColor, alpha: 0.05 });
+      this.#grid?.stroke({ width: 1 * px, color: accentColor, alpha: 0.5 });
     }
     if (numResolved === tiles.length) {
       forEach(this.#tiles?.children, (t) => {
@@ -243,9 +258,13 @@ export class D2Renderer extends D2RendererBase {
       })
       .filter((c) => primitives[c.component.$].narrow(c.component, { x, y }));
     this.overlay!.clear();
+    // Stroked one rect at a time, not batched: the alpha is per body.
     for (const b of bodies) {
-      this.overlay!.lineStyle(2 * px, accentColor, "$info" in b.component ? 1 : 0.02);
-      this.overlay?.drawRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+      this.overlay!.rect(b.left, b.top, b.right - b.left, b.bottom - b.top).stroke({
+        width: 2 * px,
+        color: accentColor,
+        alpha: "$info" in b.component ? 1 : 0.02,
+      });
     }
   }
 

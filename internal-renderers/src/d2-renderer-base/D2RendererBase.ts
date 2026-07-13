@@ -37,7 +37,7 @@ export class D2RendererBase
   extends EventEmitter<D2RendererEvents>
   implements D2RendererInterface
 {
-  protected app?: PIXI.Application<HTMLCanvasElement>;
+  protected app?: PIXI.Application;
   protected options: D2RendererOptions = defaultD2RendererOptions;
   protected system: Bush<CompiledD2IntrinsicComponent> = new Bush(16);
   protected viewport?: Viewport;
@@ -48,16 +48,22 @@ export class D2RendererBase
     return this.#count++;
   }
 
-  setup(options: Partial<D2RendererOptions>): void {
+  /**
+   * Asynchronous because PIXI v8 builds the renderer — and so the canvas, and so the
+   * event system the viewport needs — in `Application.init()`, which is async. Await
+   * this before `getView()`; until it settles there is no canvas to mount.
+   */
+  async setup(options: Partial<D2RendererOptions>): Promise<void> {
     if (this.#featureError()) {
       throw new Error(this.#featureError());
     }
     const o = { ...defaultD2RendererOptions, ...options };
-    this.setupPixi(o);
+    await this.setupPixi(o);
     this.setOptions(o);
   }
-  protected setupPixi(options: D2RendererOptions) {
-    this.app = new PIXI.Application({
+  protected async setupPixi(options: D2RendererOptions) {
+    this.app = new PIXI.Application();
+    await this.app.init({
       backgroundAlpha: 0,
       width: options.screenSize.width,
       height: options.screenSize.height,
@@ -178,7 +184,7 @@ export class D2RendererBase
   }
 
   getView(): HTMLElement | undefined {
-    return this.app?.view;
+    return this.app?.canvas;
   }
   fitCamera(
     fn: (body: Body<CompiledD2IntrinsicComponent>) => boolean = constant(true)
@@ -244,6 +250,6 @@ export class D2RendererBase
 
   async toDataUrl(): Promise<string | undefined> {
     this.app?.render?.();
-    return this.app?.view?.toDataURL?.();
+    return this.app?.canvas?.toDataURL?.();
   }
 }

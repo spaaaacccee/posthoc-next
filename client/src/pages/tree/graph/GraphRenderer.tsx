@@ -16,21 +16,20 @@ import type { GraphStoreResult } from "./buildGraphStore";
 /**
  * The graph's own renderer instance, deliberately not the viewport's.
  *
- * Two of its settings are wrong for a map and right here, which is the whole
- * reason it isn't shared:
+ * **Tiles subdivide harder**, and that is now the only setting that separates the
+ * two — the whole reason this isn't the viewport's instance. Tiles are striped
+ * across workers one-for-one, so a tile's body count *is* a worker's share of the
+ * frame — and search data is heavily clustered. On a real 717k-event trace, the
+ * viewport's `tileSubdivision: 2` leaves one worker holding ~32% of every frame; at
+ * 3 it is 14%, at 4 it is 6%. A map's bodies are spread evenly over its grid and
+ * never had this problem.
  *
- * **Tiles subdivide harder.** Tiles are striped across workers one-for-one, so a
- * tile's body count *is* a worker's share of the frame — and search data is
- * heavily clustered. On a real 717k-event trace, the viewport's `tileSubdivision:
- * 2` leaves one worker holding ~32% of every frame; at 3 it is 14%, at 4 it is 6%.
- * A map's bodies are spread evenly over its grid and never had this problem.
- *
- * **Dynamic resolution is off.** The ticker halves tile size under load, and
- * `setTileResolution` clears the tile cache outright. A graph's tiles are cached
- * against a content hash and stay valid between ramp-bucket crossings — that cache
- * is the entire reason a scrub is cheap — so a ticker evicting it twice a second
- * would undo the design. The map re-rasterizes its trace layer every step anyway,
- * so it has far less to lose and keeps the feature.
+ * Dynamic resolution is off here too, but that is no longer a difference: the
+ * viewport turned it off as well once the GPU calls were counted, so see
+ * {@link DynamicResolutionOptions.enabled} rather than repeating the reasoning. The
+ * short version is that a graph's tiles are cached against a content hash and stay
+ * valid between ramp-bucket crossings — that cache is the entire reason a scrub is
+ * cheap — and a ticker that flips tile size twice a second evicts exactly it.
  */
 const TILE_RESOLUTION = 128;
 
@@ -116,22 +115,43 @@ export function GraphRenderer({
   useEffect(() => {
     if (!ref) return;
     const instance = new D2RendererV2();
-    instance.setup({
-      ...rendererOptions,
-      screenSize: { width: 256, height: 256 },
-      backgroundColor: background,
-      accentColor: accent,
-    });
-    ref.append(instance.getView()!);
-    setRenderer(instance);
+    // `setup` is async — PIXI v8 builds its renderer, and so its canvas, in an async
+    // `init` — so the effect can be torn down while it is still in flight. `disposed`
+    // stops us mounting a renderer nobody is waiting for any more, and `mounted` keeps
+    // the teardown from trying to remove a view that was never appended.
+    let disposed = false;
+    let mounted = false;
+    const ready = instance
+      .setup({
+        ...rendererOptions,
+        screenSize: { width: 256, height: 256 },
+        backgroundColor: background,
+        accentColor: accent,
+      })
+      .then(
+        () => {
+          if (disposed) return;
+          ref.append(instance.getView()!);
+          mounted = true;
+          setRenderer(instance);
+        },
+        (e) => console.error(e),
+      );
     return () => {
-      try {
-        ref.removeChild(instance.getView()!);
-      } catch (e) {
-        console.warn(e);
-      }
+      disposed = true;
       setRenderer(undefined);
-      instance.destroy();
+      // Deferred until setup settles: destroying a half-initialised Application throws,
+      // and until then there is nothing mounted to take down.
+      void ready.then(() => {
+        if (mounted) {
+          try {
+            ref.removeChild(instance.getView()!);
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+        instance.destroy();
+      });
     };
   }, [ref, background, accent]);
 

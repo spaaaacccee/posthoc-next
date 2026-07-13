@@ -16,20 +16,49 @@ export function D2RendererComponent({
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (ref.current) {
+      const host = ref.current;
       const r = new constructor();
-      r.setup({
-        tileSubdivision: resolution,
-        workerCount: threads,
-        tileResolution: {
-          width: tileSize,
-          height: tileSize,
-        },
-        screenSize: {
-          width: 640,
-          height: 480,
-        },
-      });
-      const remove = r.add(
+      // `setup` is async in PIXI v8, and it is what spawns the workers — so nothing
+      // may be added or mounted until it settles, or the components would be posted
+      // to a worker pool that does not exist yet.
+      let disposed = false;
+      let mounted = false;
+      const ready = r
+        .setup({
+          tileSubdivision: resolution,
+          workerCount: threads,
+          tileResolution: {
+            width: tileSize,
+            height: tileSize,
+          },
+          screenSize: {
+            width: 640,
+            height: 480,
+          },
+        })
+        .then(
+          () => {
+            if (disposed) return;
+            addComponents(r);
+            host.append(r.getView()!);
+            mounted = true;
+          },
+          (e) => console.error(e)
+        );
+      return () => {
+        disposed = true;
+        void ready.then(() => {
+          r.destroy();
+          if (mounted) host.removeChild(r.getView()!);
+        });
+      };
+    }
+  }, [ref.current, resolution, threads, tileSize]);
+  return <div ref={ref} />;
+}
+
+function addComponents(r: InstanceType<typeof constructor>) {
+  return r.add(
         (
           [
             {
@@ -89,13 +118,5 @@ export function D2RendererComponent({
             },
           ] as const
         ).map((c) => ({ component: c, meta: {} }))
-      );
-      ref.current.append(r.getView()!);
-      return () => {
-        r.destroy();
-        ref.current?.removeChild?.(r.getView()!);
-      };
-    }
-  }, [ref.current, resolution, threads, tileSize]);
-  return <div ref={ref} />;
+  );
 }
