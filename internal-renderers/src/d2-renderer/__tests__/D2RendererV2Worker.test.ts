@@ -1,5 +1,5 @@
 import { defaultD2RendererOptions } from "d2-renderer/D2RendererOptions";
-import { D2RendererV2Worker, D2V2WorkerEvent } from "d2-renderer/D2RendererV2Worker";
+import { D2RendererV2Worker, D2V2WorkerEvent, tileCssSize } from "d2-renderer/D2RendererV2Worker";
 import type { SharedComponentStore } from "renderer";
 import { describe, expect, it, vi } from "vitest";
 
@@ -205,6 +205,49 @@ describe("D2RendererV2Worker", () => {
       worker.render();
 
       expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+    });
+  });
+
+  describe("setFrustum", () => {
+    // The scale screen-space sizes resolve through is part of a tile's content hash,
+    // so where it comes from decides what a zoom costs. Taken from the *camera* it
+    // slides continuously, and every tile in the frustum re-rasterizes and re-ships for
+    // the length of the gesture — which is a zoom that visibly churns. Taken from the
+    // tile grid (see `tileCssSize`) it does not move at all, and a zoom within an
+    // octave is free: the tiles are already right, and the GPU just scales the sprites.
+    it("re-rasterizes nothing when a zoom lands on the same tiles", () => {
+      const options = {
+        ...defaultD2RendererOptions,
+        workerCount: 1,
+        workerIndex: 0,
+        tileSubdivision: 2,
+        tileResolution: { width: 256, height: 256 },
+        screenSize: { width: 1024, height: 1024 },
+      };
+      const worker = new D2RendererV2Worker();
+      worker.setup(options);
+
+      // Two frustums an octave apart in *size* but not in tiling: `getTiles` snaps a
+      // tile's world size to a power of two, so both cut the world into 128-unit tiles
+      // and the closer view's tiles are a subset of the wider one's — same bounds, same
+      // bodies, same pixels.
+      const wide = { top: 0, left: 0, bottom: 1000, right: 1000 };
+      const close = { top: 0, left: 0, bottom: 600, right: 600 };
+      const scale = tileCssSize(options); // what the renderer sends, at every zoom
+
+      const store = makeStore();
+      worker.setFrustum(wide, scale);
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.render();
+
+      const events = capture(worker);
+      worker.setFrustum(close, scale);
+      worker.render();
+
+      const out = updates(events);
+      expect(out.length).toBeGreaterThan(0);
+      expect(out.every((e) => !e.payload.bitmap)).toBe(true);
     });
   });
 

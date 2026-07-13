@@ -112,12 +112,18 @@ export type DrawOptions = {
    * stated in CSS pixels and multiplied by this to reach the tile's own units.
    *
    * It is not a constant, and that is the whole reason it has to be passed in. A tile
-   * rasterizes into a fixed-size bitmap that is then *stretched* over its world
-   * bounds, and `getTiles` snaps those bounds to a power of two while the camera zooms
-   * continuously — so one tile pixel is anywhere from 1 to 2 CSS pixels' worth within
-   * an octave, and jumps at each boundary. Treating tile pixels as CSS pixels (which
-   * is what omitting this does) makes a "12px" label render at 2px and pulse with
-   * zoom.
+   * rasterizes into a fixed-size bitmap that is then *stretched* over its world bounds,
+   * so a tile pixel is not a fixed amount of screen: how much depends on the display's
+   * dpr, the pane's width and how hard the frustum is subdivided. Treating tile pixels
+   * as CSS pixels (which is what omitting this does) makes a "12px" label render at 5px
+   * on one machine and 12 on another.
+   *
+   * **It is a nominal figure, anchored to the tile grid rather than to the camera** —
+   * see `D2RendererV2Worker.#tileCssSize`. A body sized in CSS pixels therefore holds
+   * its screen size only *approximately* through a zoom, breathing by up to a factor of
+   * sqrt(2) either way across an octave. That is deliberate: an exact scale would
+   * re-rasterize every tile in the frustum continuously as you zoom, and the flicker
+   * costs far more than the drift.
    *
    * Defaults to 1, which is exactly right for a caller drawing straight to the screen.
    */

@@ -217,18 +217,6 @@ export type LayerShading = Pick<
 >;
 
 /**
- * How a kind's `size` column becomes a pixel size.
- *
- * A map is world-space: a wall is one world unit wide and should grow when you
- * zoom in. A *graph* is not — a node that keeps growing becomes a blob, and one
- * that keeps shrinking vanishes. So a graph layer wants world sizes clamped into
- * a pixel range, and wants its labels and arrowheads pinned to a fixed pixel size
- * outright.
- *
- * Both fall out of the same three knobs, and omitting all of them leaves the
- * original pure-world-space behaviour untouched.
- */
-/**
  * Soften world-space growth across a zoom band — a *multiplier* on the size, not a
  * bound on it.
  *
@@ -262,6 +250,25 @@ export type SizeDamping = {
   toScale: number;
 };
 
+/**
+ * How a kind's `size` column becomes a pixel size.
+ *
+ * A map is world-space: a wall is one world unit wide and should grow when you zoom in.
+ * A *graph* is not — a node that keeps growing becomes a blob, and one that keeps
+ * shrinking vanishes. So a graph layer wants world sizes damped (see {@link
+ * SizeDamping}) or clamped into a pixel range, and wants its labels and arrowheads
+ * pinned to a fixed pixel size outright.
+ *
+ * All of it falls out of the same few knobs, and omitting them all leaves the original
+ * pure-world-space behaviour untouched.
+ *
+ * **On "pixels".** Every pixel figure here is a CSS pixel, but a *nominal* one: the
+ * renderer resolves it against the tile grid's density rather than the live camera, so
+ * that zooming does not re-rasterize the frustum. A pixel-anchored size therefore holds
+ * its size on screen only approximately, breathing by up to a factor of sqrt(2) either
+ * way across an octave of zoom. Treat these as sizes to within a factor, not to the
+ * pixel — and see `DrawOptions.pixelScale` for why.
+ */
 export type KindSizing = {
   /** Read `size` as CSS pixels directly, ignoring zoom. */
   screen?: boolean;

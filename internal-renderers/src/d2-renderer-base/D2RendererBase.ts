@@ -22,6 +22,17 @@ function handleNaN<T>(obj: T, def: T) {
   return isNaN(obj) ? def : obj;
 }
 
+/**
+ * `zoomSmoothing` is in milliseconds; pixi-viewport's wheel plugin counts frames.
+ * Same conversion the dynamic-resolution ticker uses, and it inherits the same
+ * assumption: `targetFPMS` is the *target* rate (60fps), so on a 144Hz display the
+ * same frame count elapses sooner. Under a frame it isn't a smooth zoom at all, so
+ * anything positive gets at least one.
+ */
+function smoothingFrames(ms: number): number | false {
+  return ms > 0 ? max(1, Math.round(PIXI.Ticker.targetFPMS * ms)) : false;
+}
+
 export class D2RendererBase
   extends EventEmitter<D2RendererEvents>
   implements D2RendererInterface
@@ -98,7 +109,17 @@ export class D2RendererBase
     this.viewport
       .drag()
       .pinch()
-      .wheel()
+      // A wheel tick applies its whole scale multiplication in one frame, which reads
+      // as a step rather than a zoom. `smooth` spreads it over N frames, re-anchoring
+      // at the cursor on each one and folding a tick that arrives mid-flight into the
+      // target rather than dropping it, so spinning the wheel still accelerates.
+      //
+      // It asks nothing extra of the tile path: a tile's world size snaps to a power
+      // of two (`getTiles`), so the intermediate scales within an octave want the
+      // tiles we already hold, and the frustum-change debounce already coalesces the
+      // per-frame `moved` events a drag emits. `interrupt` (on by default) drops the
+      // remainder the moment a drag or pinch begins.
+      .wheel({ smooth: smoothingFrames(options.zoomSmoothing) })
       .decelerate({ friction: 0.98 })
       .clampZoom({ maxScale: 300, minScale: 0.00001 });
 

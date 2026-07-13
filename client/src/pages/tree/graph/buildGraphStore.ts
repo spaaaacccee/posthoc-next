@@ -99,8 +99,8 @@ const plotMarkerPx = (n: number): number => (n >= 100_000 ? 1.5 : n >= 10_000 ? 
  */
 const ARROW_PX = 10;
 const EDGE_WIDTH = 3; // world units per unit of `1 + log(traversals)`
-const EDGE_MIN_PX = 0.75;
-const EDGE_MAX_PX = 6;
+const EDGE_MIN_PX = 0.01;
+const EDGE_MAX_PX = 128;
 
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
@@ -746,17 +746,17 @@ function layerParams(mode: GraphMode, marker: number, labelColor = "#888888"): L
       // of the zoom. `min`/`max` stay on as guard rails and should almost never bind.
       circle: {
         damp: { from: 1.5, to: 40, fromScale: 1.25, toScale: 0.3 },
-        min: 1,
-        max: 32,
+        min: 0.01,
+        max: 128,
       },
       path: {
-        damp: { from: 0.5, to: 10, fromScale: 3, toScale: 0.3 },
+        damp: { from: 0.5, to: 10, fromScale: 3, toScale: 0.5 },
         min: EDGE_MIN_PX,
         max: EDGE_MAX_PX,
       },
     },
     label: {
-      size: 24,
+      size: 12,
       color: labelColor,
       offset: 4,
       // One label per cell. Sized so a 512px tile holds ~8x16 of them.

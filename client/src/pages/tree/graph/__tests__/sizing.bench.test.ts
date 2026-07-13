@@ -19,9 +19,14 @@ import { buildGraphStore, type NodeLayout } from "../buildGraphStore";
  * for every zoom beyond.
  *
  * Sizes are asserted in **CSS pixels**, which is what the clamps mean and what the eye
- * sees. A tile's own pixels are neither: its bitmap is stretched over its world
- * bounds, and `getTiles` snaps those to a power of two, so tile pixels are ~2-4x a CSS
- * pixel here and the ratio slides with zoom. See `DrawOptions.pixelScale`.
+ * sees. A tile's own pixels are neither: its bitmap is stretched over its world bounds,
+ * and `getTiles` snaps those to a power of two, so tile pixels are ~2-4x a CSS pixel
+ * here and the ratio slides with zoom. See `DrawOptions.pixelScale`.
+ *
+ * Which is why two scales appear below. The renderer hands the draw path a *nominal*
+ * one, fixed to the tile grid, so that zooming re-rasterizes nothing; the sizes it
+ * produces then land on screen through the *actual* one. Feeding `pxSize` the actual
+ * scale here would model a renderer we deliberately do not have.
  */
 
 const TRACE = resolve(__dirname, "../../../../../../experiments/astar-network.trace.yaml");
@@ -30,7 +35,8 @@ const suite = existsSync(TRACE) ? describe : describe.skip;
 const TILE = 256; // devicePixelRatio(2) * TILE_RESOLUTION(128), per GraphRenderer
 const SUBDIVISION = 3;
 const SCREEN = 1130; // css px of the graph pane
-const quantize = (v: number) => 2 ** (Math.round(Math.log2(v) * 4) / 4); // matches the worker
+/** Tile px per CSS px, as the renderer resolves it. See `D2RendererV2.handleFrustumChange`. */
+const PIXEL_SCALE = TILE / (SCREEN / 2 ** (SUBDIVISION + 0.5));
 
 suite("tree node sizing", () => {
   const trace = parse(readFileSync(TRACE, "utf8")) as Trace;
@@ -85,8 +91,11 @@ suite("tree node sizing", () => {
       );
       const b = tiles[0]!.bounds;
       const tileScale = TILE / (b.right - b.left); // tile px per world unit
-      const k = quantize(tileScale / (SCREEN / extent)); // tile px per css px
-      return pxSize(world, tileScale, { ...sizing, ...override }, k) / k;
+      // The scale a tile is *drawn* at is the grid's; the scale it is *seen* at is the
+      // camera's. They differ by up to sqrt(2) across an octave, and that gap is the
+      // breathing that buys us a zoom which re-rasterizes nothing.
+      const seen = tileScale / (SCREEN / extent); // tile px per css px, actual
+      return pxSize(world, tileScale, { ...sizing, ...override }, PIXEL_SCALE) / seen;
     };
 
     const rows = [""];

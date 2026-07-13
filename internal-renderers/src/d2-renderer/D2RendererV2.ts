@@ -19,7 +19,7 @@ import {
   defaultD2RendererOptions,
   nextResolutionScale,
 } from "./D2RendererOptions";
-import { D2V2WorkerEvents, getTiles } from "./D2RendererV2Worker";
+import { D2V2WorkerEvents, getTiles, tileCssSize } from "./D2RendererV2Worker";
 import { D2RendererV2WorkerAdapter } from "./D2RendererV2WorkerAdapter";
 import { hash } from "./hash";
 
@@ -98,6 +98,16 @@ class Tile extends PIXI.Sprite {
  */
 const TILE_BUDGET = 4;
 const MIN_TILE_BUDGET = 64;
+
+/**
+ * Ease a wheel tick's zoom over ~6 frames (see `zoomSmoothing`), rather than the
+ * instant step the base class defaults to.
+ *
+ * Long enough to read as motion, short enough that a trackpad — whose two-finger
+ * zoom arrives as a stream of small wheel events, so the camera trails the fingers
+ * by the whole window — does not feel like it is dragging a weight.
+ */
+const defaultZoomSmoothing = 100;
 
 type Layer = {
   store: SharedComponentStore;
@@ -183,7 +193,9 @@ export class D2RendererV2 extends D2RendererBase {
   }
 
   setup(options: Partial<D2RendererOptions>) {
-    super.setup(options);
+    // Ahead of `options`, not after it: this is a default v2 chooses for itself, and a
+    // caller that passes `zoomSmoothing` still wins.
+    super.setup({ zoomSmoothing: defaultZoomSmoothing, ...options });
     this.#handleWorkerChange(this.options);
   }
 
@@ -384,21 +396,27 @@ export class D2RendererV2 extends D2RendererBase {
   }
 
   /**
-   * The frustum, plus the camera's **world -> CSS pixel** scale.
+   * The frustum, plus the scale a worker needs to express a size in CSS pixels.
    *
-   * The scale is what lets a worker express a size in CSS pixels. It cannot derive
-   * one on its own: it rasterizes into a tile whose bitmap is stretched over the
-   * tile's world bounds (see `Tile.#update`), so its only native unit is the *tile*
-   * pixel — and a tile pixel is not a fixed number of CSS pixels. `getTiles` snaps a
-   * tile's world size to a power of two while the camera zooms continuously, so the
-   * ratio slides within an octave and halves at each boundary. Anything the draw path
-   * called a "pixel" therefore drifted and pulsed with zoom.
+   * A worker cannot derive one on its own: it rasterizes into a bitmap that is
+   * *stretched* over the tile's world bounds (see `Tile.#update`), so its only native
+   * unit is the tile pixel — and a tile pixel is not a fixed number of CSS pixels. How
+   * many depends on the display's dpr, the pane's size and the subdivision, so
+   * everything the draw path called a "pixel" meant something different on every
+   * machine.
+   *
+   * The scale is a property of the *pane*, not of the camera — {@link tileCssSize}
+   * takes no frustum, deliberately, and that is what keeps a zoom from re-rasterizing
+   * every tile in the frustum. Sending it from here, on a callback that fires for the
+   * camera, is a convenience: this is the message the worker already gets on both a
+   * zoom and a resize, and only the latter can actually change the value.
    */
   protected override handleFrustumChange() {
     if (!this.viewport) return;
     const { top, bottom, left, right } = this.viewport;
-    const worldToCss = right > left ? this.options.screenSize.width / (right - left) : 1;
-    map(this.#workers, (w) => w.call("setFrustum", [{ top, bottom, left, right }, worldToCss]));
+    map(this.#workers, (w) =>
+      w.call("setFrustum", [{ top, bottom, left, right }, tileCssSize(this.options)]),
+    );
   }
 
   #handleUpdate({ bounds, bitmap, hash: nextHash }: D2V2WorkerEvents["update"]) {

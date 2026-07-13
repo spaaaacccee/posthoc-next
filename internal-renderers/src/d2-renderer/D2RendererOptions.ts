@@ -68,6 +68,14 @@ export type D2RendererOptions = RendererOptions & {
   refreshInterval: number;
   animationDuration: number;
   debounceInterval: number;
+  /**
+   * Ease one wheel tick's zoom over this many milliseconds instead of applying the
+   * whole scale multiplication in a single frame. 0 turns it off.
+   *
+   * Read once, when the viewport's plugins are installed — `setOptions` will not
+   * change it on a live renderer.
+   */
+  zoomSmoothing: number;
   dynamicResolution: DynamicResolutionOptions;
 };
 
@@ -83,6 +91,9 @@ export const defaultD2RendererOptions: D2RendererOptions = {
   refreshInterval: 1000 / 24,
   animationDuration: 150,
   debounceInterval: 1000 / 24,
+  // Off, so the v1 and minimal renderers keep their instant wheel step. v2 opts in
+  // (see `defaultZoomSmoothing`).
+  zoomSmoothing: 0,
   errorColor: "#f44336",
   backgroundColor: "#ffffff",
   accentColor: "#333333",

@@ -21,8 +21,13 @@ import { buildGraphStore } from "../buildGraphStore";
 /** What `GraphRenderer` actually renders under. Both values change the answer. */
 const TILE = { width: 256, height: 256 }; // devicePixelRatio(2) * TILE_RESOLUTION(128)
 const SCREEN = 1130; // css px of the graph pane
-const quant = (v: number) => 2 ** (Math.round(Math.log2(v) * 4) / 4);
 const SUBDIVISION = 3;
+
+/**
+ * Tile pixels per CSS pixel, as the renderer resolves it: against the tile grid's
+ * *nominal* density, not the camera. See `D2RendererV2.handleFrustumChange`.
+ */
+const PIXEL_SCALE = TILE.width / (SCREEN / 2 ** (SUBDIVISION + 0.5));
 
 /**
  * Scale check against a real trace, in plot mode — the mode that actually reaches
@@ -93,14 +98,11 @@ suite("scale: 717k events, plot mode", () => {
     const last = store.total - 1;
 
     const t = columnarDrawTransform(tiles[0]!.bounds, TILE);
-    // Tile pixels per CSS pixel — the factor every screen-space size resolves through.
-    // Modelling it is the point: the clamps are CSS pixels, the tile is not.
-    const pixelScale = quant(t.sx / (SCREEN / (frustum.right - frustum.left)));
     const opts: DrawOptions = {
       step: last,
       sizing: result.params.sizing,
       label: result.params.label,
-      pixelScale,
+      pixelScale: PIXEL_SCALE,
     };
 
     let draws = 0;
@@ -132,8 +134,14 @@ suite("scale: 717k events, plot mode", () => {
     // value into a 20px ellipse per point, 717,447 times a frame.
     const sizing = result.params.sizing!.circle;
     // In CSS pixels — what the eye actually sees, and what the splat threshold means.
-    const nodeRadiusPx =
-      pxSize(store.size[result.nodeOffset]!, t.sx, sizing, pixelScale) / pixelScale;
+    //
+    // Two different scales, deliberately. `pxSize` resolves the CSS clamps through the
+    // *nominal* one, because that is what the renderer hands it; converting the tile
+    // pixels it returns back into what lands on screen goes through the *actual* one.
+    // They differ by up to sqrt(2) — the tile grid's density against the camera's — and
+    // that gap is exactly the breathing a grid-anchored size has.
+    const actual = t.sx / (SCREEN / (frustum.right - frustum.left));
+    const nodeRadiusPx = pxSize(store.size[result.nodeOffset]!, t.sx, sizing, PIXEL_SCALE) / actual;
 
     // How many tiles the average body is drawn into. A body's indexed box is derived
     // from its `size`, so an oversized radius doesn't just make each draw dearer —
