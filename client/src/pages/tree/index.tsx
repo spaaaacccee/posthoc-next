@@ -8,7 +8,7 @@ import { Placeholder } from "components/inspector/Placeholder";
 import { useViewTreeContext } from "components/inspector/ViewTree";
 import { getColorHex } from "components/renderer/colors";
 import { isEmpty } from "es-toolkit/compat";
-import { flattenSubtree } from "hooks/useHighlight";
+import { flattenSubtree, highlightNodesOptions } from "hooks/useHighlight";
 import { inferLayerName } from "layers/inferLayerName";
 import type { D2RendererV2 } from "internal-renderers/src/d2-renderer/D2RendererV2";
 import { useCallback, useMemo, useState } from "react";
@@ -17,6 +17,7 @@ import { AutoSizer as AutoSize } from "react-virtualized-auto-sizer";
 import { slice } from "slices";
 import { useLayerPicker, WithLayer } from "slices/layers";
 import { PanelState } from "slices/view";
+import { getShade } from "theme";
 import { set } from "utils/set";
 import { PageContentProps } from "../PageMeta";
 import { eventOf } from "./graph/buildGraphStore";
@@ -110,6 +111,16 @@ export function TreePage({ template: Page }: PageContentProps) {
     return Array.isArray(path) ? path : flattenSubtree(path);
   }, [highlighting]);
 
+  // Each kind of focused view has its own colour — backtracking is not subtree is not
+  // precedent — and it is the same lookup `FocusedView` uses for its banner, so the
+  // banner and the lit path always agree about what is being shown.
+  const highlightColor = getShade(
+    highlightNodesOptions.find((h) => h.type === highlighting?.type)?.color,
+    theme.palette.mode,
+    500,
+    400,
+  );
+
   // Highlighting and colour-by-property are both *recolours*: they rewrite two
   // columns and reuse the geometry and the spatial index untouched. Neither
   // rebuilds the store.
@@ -119,11 +130,13 @@ export function TreePage({ template: Page }: PageContentProps) {
     geometry: { count: graph?.store.count ?? 0 },
     nodeOffset: graph?.nodeOffset ?? 0,
     preRamp: graph?.preRamp ?? new Uint8Array(),
+    preEvent: graph?.preEvent ?? new Int32Array(),
     generation: (graph?.store.generation ?? 0) + 1,
     colors,
     background,
     edgeColor,
     highlight,
+    highlightColor,
     trackedProperty: trackedProperty || undefined,
   });
 

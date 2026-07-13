@@ -404,6 +404,33 @@ describe("drawBody: arrowheads", () => {
     expect(ctx.lineTo).toHaveBeenCalledWith(10, 5);
   });
 
+  it("backs the head off by the radius of the node it points at", () => {
+    // Without this the head is drawn *at* the terminal vertex — which in a graph is
+    // the target node's centre — and nodes are packed after edges, so they paint
+    // straight over it. The head is there; you just cannot see it.
+    const s = { ...edge(packArrow(0, 1)), arrowInset: f32([10]) } as SharedComponentStore;
+    const ctx = ctx2d();
+    drawBody(s, 0, ctx as never, unit, new Map(), {
+      step: 0,
+      sizing: { circle: { min: 3, max: 24 } },
+    });
+    // Tip pulled 10px back from (50, 0); the head is still 10px long.
+    expect(ctx.moveTo).toHaveBeenCalledWith(40, 0);
+    expect(ctx.lineTo).toHaveBeenCalledWith(30, 5);
+    expect(ctx.lineTo).toHaveBeenCalledWith(30, -5);
+  });
+
+  it("does not inset a body that asked for none, under a clamped circle policy", () => {
+    // `pxSize(0, ...)` returns the circle policy's *minimum*, so reading the inset
+    // unguarded would hand every head a 3px offset it never asked for.
+    const ctx = ctx2d();
+    drawBody(edge(packArrow(0, 1)), 0, ctx as never, unit, new Map(), {
+      step: 0,
+      sizing: { circle: { min: 3, max: 24 } },
+    });
+    expect(ctx.moveTo).toHaveBeenCalledWith(50, 0);
+  });
+
   it("sizes the head in screen pixels, so zoom does not change it", () => {
     const zoomed = columnarDrawTransform(
       { top: 0, left: 0, right: 10, bottom: 10 },

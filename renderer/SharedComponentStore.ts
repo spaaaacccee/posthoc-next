@@ -167,6 +167,22 @@ export type SharedComponentStore = {
   arrow?: Uint8Array;
 
   /**
+   * How far to back an arrowhead off its terminal vertex, so it lands on the edge of
+   * the thing it points at rather than buried in the middle of it.
+   *
+   * The value is the **world size of the target body**, and the draw path resolves it
+   * through the same sizing policy as `circle` — because in a graph an arrow points
+   * at a node, and a node's drawn radius is a clamped, zoom-dependent screen quantity
+   * (3-24px here). Storing a world-space inset instead cannot work: fitted, a 20-unit
+   * radius is 0.08px while the node still draws at its 3px floor, so the head stays
+   * under the circle. Storing a fixed screen inset cannot work either, since the
+   * radius it must match changes with zoom.
+   *
+   * Absent, or 0 for a given body, means the head sits on the vertex.
+   */
+  arrowInset?: Float32Array;
+
+  /**
    * Text anchoring: two nibbles, `packAlign(align, baseline)`, indexing
    * {@link TEXT_ALIGNS} / {@link TEXT_BASELINES}. Applies to `text` bodies and to
    * inline labels. 0 (`left`/`alphabetic`) reproduces the original behaviour.

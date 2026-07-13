@@ -82,6 +82,17 @@ const NODE_SCALE = 10;
  */
 const plotMarkerPx = (n: number): number => (n >= 100_000 ? 2 : n >= 10_000 ? 3 : 5);
 
+/**
+ * Arrowhead size, in screen pixels, and the pixel ceiling on an edge's width.
+ *
+ * They are declared together because only their *ratio* matters. `drawArrowhead`
+ * makes a triangle as wide as it is long, so a head is only legible as a head if it
+ * clearly out-measures the line it terminates: at 8px on an edge free to clamp to
+ * 6px, it reads as the line getting slightly fatter and nothing more.
+ */
+const ARROW_PX = 12;
+const EDGE_MAX_PX = 4;
+
 export type GraphMode = "tree" | "directed-graph" | "plot";
 
 /** A node's laid-out position, from dagre. Keyed by `String(event.id)`. */
@@ -185,6 +196,14 @@ export type GraphStoreResult = {
    * the edges. 0 marks a ghost.
    */
   preRamp: Uint8Array;
+  /**
+   * The child event behind each pre-node body (i.e. each edge).
+   *
+   * A focused view is a set of *steps*, and an edge belongs to the node it points
+   * at, so this is what lets a recolour light the edges along a path as well as its
+   * nodes — without re-deriving the edge set from the trace.
+   */
+  preEvent: Int32Array;
 };
 
 /** The event a clicked body refers to; `undefined` for a ghost or an edge. */
@@ -324,45 +343,60 @@ export function buildGraphStore({
 
   // ---- Edges.
   //
-  // **One edge body per child event, not per edge.** An edge body carries a single
-  // `start`, and its ramp resolves against that — so an edge packed once, at the
-  // moment it was created, would freeze at the colour its child had *then*. Revisit
-  // the child and it re-brightens while its edge stays stale: node and edge drift
-  // apart, which is wrong, because an edge belongs to the node it points at.
+  // **One edge body per parent claim, not per edge.** Every event that names a `pId`
+  // is a claim, and it gets a body — including the ones a later event overrides.
   //
-  // Giving the edge the *same span and the same ramp* as its child's current body
-  // makes them resolve to the same colour by construction rather than by
-  // coincidence. The spans tile exactly, so only one edge body per edge is ever
-  // visible — the renderer still draws one line.
+  // That is what makes a re-parent visible. A search that reaches C from A and later
+  // finds a better route from B emits two claims; keeping only the final one (which
+  // is what the layout is built from) leaves C with *no* edge at all for the whole
+  // stretch of the search where its parent really was A. The edge has to be the
+  // node's parent **as of the playhead**, not as of the end of the search.
   //
-  // `edges` (one entry per distinct edge) survives only to build the ghosts and to
+  // The spans do it, with no per-step work. An edge body takes its child's span —
+  // `[i, next event on that child)` — so at any step exactly one of a node's claims
+  // is alive: the most recent one before the playhead. A re-parent simply swaps
+  // which body is showing. (A directed graph wants the opposite: every claim it ever
+  // made, all at once. Same bodies, `end = total`.)
+  //
+  // Sharing the child's span also fixes the colour: same span + same ramp => same
+  // bucket => node and edge resolve to the same colour by construction, at every
+  // step, rather than the edge freezing at the colour its child had when the edge
+  // was born.
+  //
+  // `edges` (one entry per *distinct* edge) survives only to build the ghosts and to
   // count traversals.
-  type Edge = { from: string; to: string; at: number; visits: number };
+  type Edge = { from: string; to: string; at: number; visits: number; final: boolean };
   const edges = new Map<string, Edge>();
   /** Event indices that get an edge body, in order. */
   const edgeEvents: number[] = [];
   const edgeVisits: number[] = [];
 
   if (mode !== "plot") {
-    // A tree keeps only each node's *final* parent, so a re-parented node has one
-    // edge; a directed graph keeps every parent it ever had.
+    // A node's *last* parent. Not a filter on the bodies any more — it only marks
+    // which edges the ghost tree draws, since the ghost is the shape dagre laid out
+    // and dagre lays out the final tree.
     const finalParent = new Map<string, string>();
-    if (mode === "tree") {
-      for (const e of events) {
-        if (e.pId != null) finalParent.set(String(e.id), String(e.pId));
-      }
+    for (const e of events) {
+      if (e.pId != null) finalParent.set(String(e.id), String(e.pId));
     }
     for (let i = 0; i < n; i++) {
       const e = events[i]!;
       if (e.pId == null) continue;
       const id = String(e.id);
       const pId = String(e.pId);
-      if (mode === "tree" && finalParent.get(id) !== pId) continue;
       const key = `${id}::${pId}`;
       const existing = edges.get(key);
       const visits = (existing?.visits ?? 0) + 1;
       if (existing) existing.visits = visits;
-      else edges.set(key, { from: id, to: pId, at: i, visits: 1 });
+      else {
+        edges.set(key, {
+          from: id,
+          to: pId,
+          at: i,
+          visits: 1,
+          final: finalParent.get(id) === pId,
+        });
+      }
       edgeEvents.push(i);
       edgeVisits.push(visits);
     }
@@ -418,37 +452,70 @@ export function buildGraphStore({
     // arrowhead's reach the moment the column exists, and plot mode — which has no
     // paths at all — was paying 32px a side for arrows it cannot draw.
     arrow: points ? sab(Uint8Array, 1, n) : undefined,
+    arrowInset: points ? sab(Float32Array, 4, n) : undefined,
     ramp: sab(Uint8Array, 1, n),
     ramps,
   });
 
   const arrowPacked = ARROW_TRIANGLE << 4; // end only; start = none
 
-  /** Write a 2-point path from node `from` to node `to` into `s` at body `b`. */
+  /**
+   * Write a 2-point path into `s` at body `b`, running **parent -> child**.
+   *
+   * The direction is the search's: a parent expands into a child, so that is where
+   * the arrow points. (Writing it child-first — which is how the child's own event
+   * reads — puts the head on the *parent*, pointing backwards up the tree.)
+   *
+   * `inset` is the child's world radius, so the head can be backed off far enough to
+   * clear the circle that will be painted over this edge. See
+   * {@link SharedComponentStore.arrowInset}.
+   */
   const edge = (
     s: SharedComponentStore,
     b: number,
     pt: number,
-    from: number,
-    to: number,
+    parent: number,
+    child: number,
     width: number,
     start: number,
     end: number,
+    inset: number,
   ) => {
     s.kind[b] = KIND_PATH;
-    s.pts[pt] = px[from]!;
-    s.pts[pt + 1] = py[from]!;
-    s.pts[pt + 2] = px[to]!;
-    s.pts[pt + 3] = py[to]!;
+    s.pts[pt] = px[parent]!;
+    s.pts[pt + 1] = py[parent]!;
+    s.pts[pt + 2] = px[child]!;
+    s.pts[pt + 3] = py[child]!;
     s.ptOff[b + 1] = (pt + 4) / 2;
     s.size[b] = width;
-    s.size2[b] = 8; // arrowhead size, in screen pixels
+    // Arrowhead size, in screen pixels. It has to out-measure the line it sits on or
+    // it reads as a thickening rather than as a head — the triangle is as wide as it
+    // is long, so at 8px against an edge clamped to 6px there was nothing to see.
+    s.size2[b] = ARROW_PX;
     s.arrow![b] = arrowPacked;
+    s.arrowInset![b] = inset;
     s.alpha[b] = 1;
     s.start[b] = start;
     s.end[b] = end;
     s.fill[b] = ghostFill;
   };
+
+  /**
+   * Each event's node radius, in world units. Precomputed because the *edge* bodies
+   * need it too — an arrowhead has to know how big the circle it points at will be —
+   * and the edges are packed before the nodes.
+   */
+  const GHOST_RADIUS = 1.4 * NODE_SCALE;
+  const nodeSize = new Float32Array(n);
+  if (mode !== "plot") {
+    const seen = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+      const id = String(events[i]!.id);
+      const v = (seen.get(id) ?? 0) + 1;
+      seen.set(id, v);
+      nodeSize[i] = (2 + Math.log(v)) * NODE_SCALE;
+    }
+  }
 
   // ---- The ghost layer.
   let ghost: SharedComponentStore | undefined;
@@ -457,10 +524,14 @@ export function buildGraphStore({
     let g = 0;
     let gpt = 0;
     for (const e of edges.values()) {
-      const a = firstOf.get(e.from);
-      const c = firstOf.get(e.to);
-      if (a === undefined || c === undefined) continue;
-      edge(ghost, g, gpt, a, c, 1, 0, e.at);
+      // The ghost is the shape the search *will* have, and in a tree that is the
+      // final-parent tree — the one dagre laid out. Ghosting the transient claims
+      // too would draw scaffolding for edges that never end up existing.
+      if (mode === "tree" && !e.final) continue;
+      const child = firstOf.get(e.from);
+      const parent = firstOf.get(e.to);
+      if (child === undefined || parent === undefined) continue;
+      edge(ghost, g, gpt, parent, child, 1, 0, e.at, GHOST_RADIUS);
       gpt += 4;
       g++;
     }
@@ -470,7 +541,7 @@ export function buildGraphStore({
       ghost.y[g] = py[i]!;
       // Smaller than the real thing: a ghost is scaffolding, and should read as
       // behind the search rather than competing with it.
-      ghost.size[g] = 1.4 * NODE_SCALE;
+      ghost.size[g] = GHOST_RADIUS;
       ghost.alpha[g] = 1; // the layer's alpha does the fading
       ghost.start[g] = 0;
       ghost.end[g] = i; // gives way exactly as the node is first reached
@@ -489,17 +560,34 @@ export function buildGraphStore({
   let pt = 0;
   /** Ramp id per pre-node body, so a recolour can restore an edge's child colour. */
   const preRamp: number[] = [];
+  /** Child event per pre-node body, so a recolour can tell which edges are on a path. */
+  const preEvent: number[] = [];
+
+  // A directed graph shows every claim at once; a tree shows the current one. The
+  // only difference is where the edge body's span ends.
+  const allEdges = mode === "directed-graph";
 
   for (let k = 0; k < edgeEvents.length; k++) {
     const i = edgeEvents[k]!;
     const ev = events[i]!;
-    const a = firstOf.get(String(ev.id));
-    const c = firstOf.get(String(ev.pId));
-    if (a === undefined || c === undefined) continue;
-    // The child's span, exactly — so this body is showing precisely while the
-    // child's is, and the next one takes over on the next visit.
+    const child = firstOf.get(String(ev.id));
+    const parent = firstOf.get(String(ev.pId));
+    if (child === undefined || parent === undefined) continue;
+    // The child's span, exactly — so this body shows precisely while the child's
+    // does, and the child's *next* event (a revisit, or a re-parent) hands over to
+    // the body packed for it.
     // Line width in world units; the layer clamps it into a pixel range.
-    edge(store, b, pt, a, c, 1 + Math.log(edgeVisits[k]!), i, until[i]!);
+    edge(
+      store,
+      b,
+      pt,
+      parent,
+      child,
+      1 + Math.log(edgeVisits[k]!),
+      i,
+      allEdges ? total : until[i]!,
+      nodeSize[i]!,
+    );
     pt += 4;
     // And the child's ramp. Same span + same ramp => same bucket => same colour,
     // for free, at every step.
@@ -507,13 +595,13 @@ export function buildGraphStore({
     store.fill[b] = edgeFill;
     ramp[b] = r;
     preRamp[b] = r;
+    preEvent[b] = i;
     b++;
   }
   // Node bodies start here, which is what makes a clicked body index invertible
   // back to an event (see `eventOf`).
   const nodeOffset = b;
 
-  const visits = new Map<string, number>();
   const strings = store.strings;
   const stringOf = new Map<string, number>();
   // Plot markers are uniform: in plot mode a body is an *event*, not a node, so
@@ -529,8 +617,6 @@ export function buildGraphStore({
   for (let i = 0; i < n; i++) {
     const e = events[i]!;
     const id = String(e.id);
-    const v = (visits.get(id) ?? 0) + 1;
-    visits.set(id, v);
 
     const X = px[i]!;
     const Y = py[i]!;
@@ -542,9 +628,13 @@ export function buildGraphStore({
     store.kind[b] = KIND_CIRCLE;
     store.x[b] = X;
     store.y[b] = Y;
-    // In tree/DAG this doubles as the label grid's importance, so a much-visited
-    // node keeps its label when a quiet neighbour loses it.
-    store.size[b] = persistent ? marker : (2 + Math.log(v)) * NODE_SCALE;
+    // The same `nodeSize` the edge bodies backed their arrowheads off by — read from
+    // one array rather than recomputed here, so the circle and the head that has to
+    // clear it cannot drift apart.
+    //
+    // In tree/DAG this doubles as the label grid's importance, so a much-visited node
+    // keeps its label when a quiet neighbour loses it.
+    store.size[b] = persistent ? marker : nodeSize[i]!;
     store.alpha[b] = 1;
     store.start[b] = i;
     store.end[b] = until[i]!;
@@ -570,6 +660,7 @@ export function buildGraphStore({
     scales,
     nodeOffset,
     preRamp: Uint8Array.from(preRamp.slice(0, nodeOffset)),
+    preEvent: Int32Array.from(preEvent.slice(0, nodeOffset)),
     bounds: n ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: PLOT_SPAN, maxY: PLOT_SPAN },
   };
 }
@@ -639,7 +730,7 @@ function layerParams(mode: GraphMode, marker: number, labelColor = "#888888"): L
       // are affordable and legibility wins: at 1px a fitted tree is a smear of dots,
       // which is what "nodes are way too small" looked like.
       circle: { min: 3, max: 24 },
-      path: { min: 1, max: 6 },
+      path: { min: 1, max: EDGE_MAX_PX },
     },
     label: {
       size: 12,

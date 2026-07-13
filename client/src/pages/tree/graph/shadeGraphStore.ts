@@ -44,6 +44,12 @@ export type ShadeGraphStoreOptions = {
    * depend on the playhead, on a highlight, or on any property.)
    */
   preRamp: Uint8Array;
+  /**
+   * Child event per edge body, from the build. A focused view is a set of *steps*,
+   * so this is what turns "these steps are on the path" into "these edges are on the
+   * path" — without rebuilding the edge set here.
+   */
+  preEvent: Int32Array;
   events?: TraceEvent[];
 
   /** Event type -> CSS colour. */
@@ -86,6 +92,7 @@ export function shadeGraphStore({
   geometry,
   nodeOffset,
   preRamp,
+  preEvent,
   events = [],
   colors,
   background,
@@ -147,7 +154,15 @@ export function shadeGraphStore({
     const dim = palette.push(interpolate([colors[""] ?? "#888888", background])(0.85)) - 1;
     const hot = palette.push(highlightColor) - 1;
     fill.fill(dim);
-    for (let b = 0; b < nodeOffset; b++) fill[b] = edgeFill;
+
+    const onPath = new Set(highlight);
+    // Edges as well as nodes. An edge belongs to the node it points at, so an edge
+    // whose child event is on the path *is* on the path — and lighting the nodes
+    // while leaving the edges neutral makes a focused view read as a scatter of lit
+    // dots rather than as the route it is.
+    for (let b = 0; b < nodeOffset; b++) {
+      fill[b] = onPath.has(preEvent[b]!) ? hot : edgeFill;
+    }
     for (const step of highlight) {
       const b = nodeOffset + step;
       if (b < count) fill[b] = hot;

@@ -171,7 +171,12 @@ export class D2RendererV2 extends D2RendererBase {
       }
     }
     bodies.sort((a, b) => b.z - a.z || b.index - a.index);
-    this.emit("clickBody", e.event, {
+    // Unwrap PIXI's synthetic event to the DOM one it was made from. A
+    // `FederatedPointerEvent` is not a `MouseEvent`, so a consumer that tests
+    // `instanceof MouseEvent` before reading `clientX`/`clientY` — which is how you
+    // place a context menu at the cursor — sees neither, and anchors to (0, 0).
+    const native = (e.event as { nativeEvent?: Event }).nativeEvent ?? e.event;
+    this.emit("clickBody", native, {
       world: { x, y },
       bodies: bodies.map(({ handle, index }) => ({ handle, index })),
     });

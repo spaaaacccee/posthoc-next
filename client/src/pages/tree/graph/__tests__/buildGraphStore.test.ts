@@ -115,34 +115,75 @@ describe("buildGraphStore: edges", () => {
     for (const e of edges) expect(e.arrow).toBe(1 << 4);
   });
 
-  it("runs each edge between its endpoints' laid-out positions", () => {
+  it("runs each edge from the parent to the child, not the other way", () => {
+    // The direction is the *search's*: a parent expands into a child, so that is
+    // where the head points. Writing it child-first — which is how the child's own
+    // event reads — aims the arrow back up the tree at the parent.
     const r = build();
     // y is negated: dagre grows downward, the view grows upward.
     const [e] = bodiesOf(r, 2);
     const from = r.store.ptOff[e!.i]! * 2;
-    expect(Array.from(r.store.pts.slice(from, from + 4))).toEqual([10, -100, 0, -0]);
+    // Edge for event 1 (`b`, parent `a`): starts at a (0, -0), ends at b (10, -100).
+    expect(Array.from(r.store.pts.slice(from, from + 4))).toEqual([0, -0, 10, -100]);
   });
 
-  it("keeps only the final parent in tree mode, but every parent in a DAG", () => {
-    const reparented: Trace = {
-      version: "1.4.0",
-      events: [
-        { type: "generating", id: "a", pId: null },
-        { type: "generating", id: "b", pId: "a" },
-        { type: "generating", id: "c", pId: null },
-        { type: "generating", id: "b", pId: "c" }, // b re-parented onto c
-      ],
-    };
-    const l: NodeLayout[] = [
-      { label: "a", x: 0, y: 0, size: 1 },
-      { label: "b", x: 10, y: 10, size: 1 },
-      { label: "c", x: 20, y: 20, size: 1 },
-    ];
-    const tree = build({ trace: reparented, layout: l, mode: "tree" });
-    expect(bodiesOf(tree, 2)).toHaveLength(1); // only b -> c survives
+  it("backs each arrowhead off by the radius of the node it points at", () => {
+    // Otherwise the head is drawn at the terminal vertex — a node's *centre* — and
+    // nodes are packed after edges, so they paint straight over it. The head has to
+    // clear the circle, and the circle's drawn radius is a clamped screen quantity,
+    // so the inset has to be the target's size rather than a distance.
+    const r = build();
+    const [edge] = bodiesOf(r, 2); // event 1: `b`, first visit
+    const b = bodiesOf(r, 1).find((x) => x.label === "b")!;
+    expect(r.store.arrowInset![edge!.i]).toBeCloseTo(b.size!, 5);
+    expect(r.store.arrowInset![edge!.i]).toBeGreaterThan(0);
+  });
 
-    const dag = build({ trace: reparented, layout: l, mode: "directed-graph" });
-    expect(bodiesOf(dag, 2)).toHaveLength(2); // b -> a and b -> c
+  const reparented = (): Trace => ({
+    version: "1.4.0",
+    events: [
+      { type: "generating", id: "a", pId: null },
+      { type: "generating", id: "b", pId: "a" },
+      { type: "generating", id: "c", pId: null },
+      { type: "generating", id: "b", pId: "c" }, // b re-parented onto c
+    ],
+  });
+  const reLayout = (): NodeLayout[] => [
+    { label: "a", x: 0, y: 0, size: 1 },
+    { label: "b", x: 10, y: 10, size: 1 },
+    { label: "c", x: 20, y: 20, size: 1 },
+  ];
+
+  it("shows a node's parent as of the playhead, not its final parent", () => {
+    // The search reaches `b` from `a`, then re-parents it onto `c`. Until that second
+    // event `b`'s parent really *is* `a`, and the tree has to say so. Keeping only the
+    // final parent — which is what the layout is built from — leaves `b` with no edge
+    // at all for the entire stretch of the search where it had one.
+    const tree = build({ trace: reparented(), layout: reLayout(), mode: "tree" });
+    const es = bodiesOf(tree, 2);
+    expect(es).toHaveLength(2);
+    // Disjoint spans, so exactly one is alive at a time: the latest claim before the
+    // playhead. No per-step work — the re-parent is just a handover between bodies.
+    expect(es.map((e) => [e.start, e.end])).toEqual([
+      [1, 3], // b -> a, until b's next event
+      [3, 4], // b -> c, from the re-parent onward
+    ]);
+  });
+
+  it("shows every parent a node ever had, all at once, in a DAG", () => {
+    const dag = build({ trace: reparented(), layout: reLayout(), mode: "directed-graph" });
+    // Same bodies as the tree; they just never expire. That *is* "show all edges".
+    expect(bodiesOf(dag, 2).map((e) => [e.start, e.end])).toEqual([
+      [1, 4],
+      [3, 4],
+    ]);
+  });
+
+  it("ghosts only the final tree, which is the one dagre laid out", () => {
+    // The ghost is the shape the search *will* have. Ghosting the transient claims
+    // too would scaffold edges that never end up existing.
+    const tree = build({ trace: reparented(), layout: reLayout(), mode: "tree" });
+    expect(bodiesIn(tree.ghost!, 2)).toHaveLength(1); // b -> c only
   });
 
   it("thickens an edge as it is re-traversed", () => {

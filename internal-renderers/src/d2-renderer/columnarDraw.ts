@@ -376,7 +376,7 @@ export function drawBody(
       ctx.lineWidth = ceil(pxSize(store.size[i]!, t.sx, sizing?.path)) || 1;
       ctx.stroke();
       const a = store.arrow?.[i] ?? 0;
-      if (a) drawArrows(store, i, ctx, t, from, to, a, style);
+      if (a) drawArrows(store, i, ctx, t, from, to, a, style, o);
     }
     if (o.label && store.label[i]) {
       const x = store.pts[from]! * t.sx + t.x;
@@ -409,7 +409,14 @@ export function drawBody(
   }
 }
 
-/** Both ends of a path's arrowheads, sized in screen pixels from `size2`. */
+/**
+ * Both ends of a path's arrowheads, sized in screen pixels from `size2`.
+ *
+ * The head is pulled back off its terminal vertex by {@link
+ * SharedComponentStore.arrowInset}. Without that it is drawn *at* the vertex — which
+ * in a graph is a node's centre — and since nodes are packed after edges, they paint
+ * straight over it: an 8px head under a 3-24px circle is simply invisible.
+ */
 function drawArrows(
   store: SharedComponentStore,
   i: number,
@@ -419,10 +426,16 @@ function drawArrows(
   to: number,
   packed: number,
   style: string,
+  o: DrawOptions,
 ): void {
   const n = (to - from) / 2;
   if (n < 2) return;
   const size = store.size2[i]! || 8;
+  // The target's own drawn radius, under the policy that will draw it. Guarded on
+  // being non-zero: `pxSize(0, ...)` would return the circle policy's *minimum*, so
+  // a body with no inset would silently gain one.
+  const world = store.arrowInset?.[i] ?? 0;
+  const inset = world ? pxSize(world, t.sx, o.sizing?.circle) : 0;
   ctx.fillStyle = style;
 
   const end = arrowEnd(packed);
@@ -434,7 +447,11 @@ function drawArrows(
     const dx = tx - qx;
     const dy = ty - qy;
     const len = sqrt(dx * dx + dy * dy);
-    if (len > 0) drawArrowhead(ctx, tx, ty, dx / len, dy / len, size, end);
+    if (len > 0) {
+      const ux = dx / len;
+      const uy = dy / len;
+      drawArrowhead(ctx, tx - ux * inset, ty - uy * inset, ux, uy, size, end);
+    }
   }
 
   const start = arrowStart(packed);
@@ -446,6 +463,10 @@ function drawArrows(
     const dx = tx - qx;
     const dy = ty - qy;
     const len = sqrt(dx * dx + dy * dy);
-    if (len > 0) drawArrowhead(ctx, tx, ty, dx / len, dy / len, size, start);
+    if (len > 0) {
+      const ux = dx / len;
+      const uy = dy / len;
+      drawArrowhead(ctx, tx - ux * inset, ty - uy * inset, ux, uy, size, start);
+    }
   }
 }
