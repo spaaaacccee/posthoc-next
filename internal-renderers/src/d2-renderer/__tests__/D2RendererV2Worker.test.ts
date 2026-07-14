@@ -566,3 +566,131 @@ describe("colour ramps", () => {
     expect(worker.layerTileCacheSize).toBe(0);
   });
 });
+
+/**
+ * A trace: `n` bodies packed in event order, body `i` opening at step `i` and
+ * never closing. All of them sit in one small region, so they land in the same
+ * tile — which is what a search frontier does, and what makes the per-tile cost
+ * worth caring about.
+ */
+function makeTraceStore(n = 120): SharedComponentStore {
+  const kind = new Uint8Array(new SharedArrayBuffer(n)); // all rects
+  const fill = <T,>(v: T) => Array.from({ length: n }, () => v);
+  return {
+    ...makeStore(),
+    count: n,
+    total: n,
+    kind,
+    x: f32(Array.from({ length: n }, (_, i) => (i % 10) * 2)),
+    y: f32(Array.from({ length: n }, (_, i) => Math.floor(i / 10) * 2)),
+    size: f32(fill(1)),
+    size2: f32(fill(1)),
+    alpha: f32(fill(1)),
+    start: i32(Array.from({ length: n }, (_, i) => i)), // opens at its own step
+    end: i32(fill(n)), // never closes
+    fill: i32(fill(1)),
+    label: i32(fill(0)),
+    ptOff: i32(new Array(n + 1).fill(0)),
+  };
+}
+
+/** Count `fillRect` calls — one per rect body drawn — during `fn`. */
+function countFillRects(fn: () => void): number {
+  const proto = Object.getPrototypeOf(
+    document.createElement("canvas").getContext("2d")!,
+  ) as CanvasRenderingContext2D;
+  const spy = vi.spyOn(proto, "fillRect");
+  try {
+    fn();
+    return spy.mock.calls.length;
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/** Play the playhead from 0 to `n - 1`, rendering every step. */
+function play(worker: D2RendererV2Worker, n: number) {
+  for (let s = 0; s < n; s++) {
+    worker.setStep(s);
+    worker.render();
+  }
+}
+
+describe("accumulation", () => {
+  const N = 120;
+
+  function loaded(store: SharedComponentStore) {
+    const worker = makeWorker();
+    worker.setLayer("a", { store, generation: store.generation });
+    worker.buildLayerIndex("a"); // packs + attaches the index
+    return worker;
+  }
+
+  it("draws each body once over a whole playback, not once per step", () => {
+    // The bug this pins: a trace layer is not step-invariant, so every step used
+    // to re-query its tile and redraw *every body accumulated so far* in order to
+    // add one. That is O(step) per frame — quadratic over a playback — and it is
+    // why a long trace played slower the further in you got.
+    const accumulating = countFillRects(() => play(loaded(makeTraceStore(N)), N));
+
+    // Control: the same trace, but body 0 lives from step 0 to step 60 — a span
+    // wider than one step and narrower than the trace, i.e. a `clear: "..."`
+    // special. Persistent bodies born after it outrank it, so it can be neither
+    // accumulated nor composited on top, and the layer falls back to the one-shot
+    // path. (A one-step `clear: true` transient would *not* work as a control:
+    // that is an ephemeral, and the layer still accumulates. See `isAccumulable`.)
+    const spanning = makeTraceStore(N);
+    spanning.end.set([60], 0);
+    const redrawing = countFillRects(() => play(loaded(spanning), N));
+
+    // Assert the *shape*, not a ratio — the ratio grows with N, so pinning it
+    // would just be pinning this test's N.
+    //
+    // Redrawing pays a triangular number of body draws (~N²/2). Accumulating pays
+    // each body exactly once, plus a background + notch fill per tile per emitted
+    // step, which is why this is a bound rather than `=== N`.
+    expect(redrawing).toBeGreaterThan((N * N) / 4);
+    expect(accumulating).toBeGreaterThanOrEqual(N);
+    expect(accumulating).toBeLessThan(N * 5);
+  });
+
+  it("emits no bitmap for a step that brings nothing new into the tile", () => {
+    // Bodies only open on even steps, so an odd step changes nothing.
+    const store = makeTraceStore(N);
+    store.start.set(Array.from({ length: N }, (_, i) => i * 2));
+    store.total = N * 2;
+    store.end.set(Array.from({ length: N }, () => N * 2));
+
+    const worker = loaded(store);
+    const events = capture(worker);
+
+    worker.setStep(10); // even: body 5 has just arrived
+    worker.render();
+    expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+
+    events.length = 0;
+    worker.setStep(11); // odd: nothing arrives
+    worker.render();
+    expect(updates(events).some((e) => e.payload.bitmap)).toBe(false);
+  });
+
+  it("redraws from scratch when the playhead is scrubbed backwards", () => {
+    // An accumulation canvas can add bodies but never un-draw them, so going
+    // back has to start over — otherwise the tile would show the future.
+    const worker = loaded(makeTraceStore(N));
+    worker.setStep(N - 1);
+    worker.render();
+
+    // Back to step 5: only bodies 0..5 may be on the tile, so the canvas is
+    // rebuilt — which we can see as a fresh burst of draws.
+    const onScrubBack = countFillRects(() => {
+      worker.setStep(5);
+      worker.render();
+    });
+    expect(onScrubBack).toBeGreaterThanOrEqual(6);
+
+    // ...and it is a *rebuild*, not an append: the 114 bodies that opened after
+    // step 5 are not drawn again.
+    expect(onScrubBack).toBeLessThan(N / 2);
+  });
+});

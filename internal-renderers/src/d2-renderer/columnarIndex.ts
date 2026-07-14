@@ -195,7 +195,116 @@ export function isStepInvariant(store: SharedComponentStore): boolean {
   return true;
 }
 
+/**
+ * A body that, once visible, stays visible for the rest of the trace. The packer
+ * gives these the span `[birth, total)` — a search node that is expanded and
+ * stays expanded. These are what a tile *accumulates*.
+ */
+export const isPersistent = (store: SharedComponentStore, i: number) =>
+  store.end[i]! >= store.total;
+
+/**
+ * A body alive at exactly one step: `[s, s+1)`. Both a `clear: true` transient
+ * and a `clear: "..."` special that happens to be cleared by the very next step
+ * land here, and they are treated identically because they behave identically.
+ *
+ * These cannot be accumulated — they have to be un-drawn — so they are redrawn
+ * every step. That is cheap, because only one step's worth is ever alive at once.
+ */
+export const isEphemeral = (store: SharedComponentStore, i: number) =>
+  store.end[i]! === store.start[i]! + 1;
+
+/**
+ * True when this layer's tiles can be built by *accumulation*: drawn once and
+ * then extended, rather than re-queried and redrawn from scratch on every step.
+ *
+ * Every body must be either {@link isPersistent} or {@link isEphemeral}, and the
+ * layer must carry no colour ramp. Then a tile at step `s+1` is a tile at step
+ * `s`, plus the persistent bodies that arrived, plus this step's ephemerals drawn
+ * on top — and nothing that has been accumulated ever has to be un-drawn.
+ *
+ * **Why ephemerals may safely be drawn on top.** Bodies draw in ascending index
+ * order, and the packer emits each step as `persistent, transient, special` (see
+ * `buildSharedComponentStore`). So an ephemeral born at step `s` outranks every
+ * persistent body born at steps `0..s` — and no persistent body born *after* `s`
+ * is visible yet. It is therefore already above everything alive beneath it, and
+ * compositing it last preserves the exact order a full redraw would produce.
+ *
+ * **What is excluded, and why it has to be.** A body with a span *wider* than one
+ * step but narrower than the trace — a `clear: "..."` special cleared many steps
+ * later — breaks that argument: persistent bodies born after it are visible, sort
+ * above it, and would have to be drawn over it. Since it cannot be baked into the
+ * accumulation canvas (it must eventually disappear) and cannot be drawn on top
+ * (it would occlude bodies that outrank it), such a layer falls back to the
+ * one-shot path. Correct, just not fast.
+ *
+ * Strictly weaker than {@link isStepInvariant}, which gets the better deal still:
+ * its raster is drawn once and then never touched at all.
+ */
+export function isAccumulable(store: SharedComponentStore): boolean {
+  if (store.ramps?.length) return false;
+  for (let i = 0; i < store.count; i++) {
+    if (isPersistent(store, i) || isEphemeral(store, i)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * True when `start` is non-decreasing in body index — which it is whenever the
+ * store was packed in event order, i.e. always, in practice.
+ *
+ * It means the bodies that become visible over a step range occupy a *contiguous*
+ * index range, so the accumulator can find them with two binary searches rather
+ * than an R-tree query. That matters more than it sounds: the Flatbush filter
+ * visits every candidate box in the tile whatever the playhead is doing, so a
+ * per-step query costs O(bodies ever in this tile) even when nothing new arrived.
+ */
+export function hasSortedStarts(store: SharedComponentStore): boolean {
+  for (let i = 1; i < store.count; i++) if (store.start[i]! < store.start[i - 1]!) return false;
+  return true;
+}
+
+/**
+ * Index of the first body whose `start` is greater than `step` — the upper bound
+ * of the visible prefix. Requires {@link hasSortedStarts}.
+ */
+export function startUpperBound(store: SharedComponentStore, step: number): number {
+  let lo = 0;
+  let hi = store.count;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (store.start[mid]! <= step) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Index of the first body whose `start` is at or after `step`. With
+ * {@link startUpperBound} this brackets the bodies *born at* `step` — which is
+ * exactly the set of ephemerals alive there. Requires {@link hasSortedStarts}.
+ */
+export function startLowerBound(store: SharedComponentStore, step: number): number {
+  let lo = 0;
+  let hi = store.count;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (store.start[mid]! < step) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 export type QueryBounds = { top: number; left: number; right: number; bottom: number };
+
+/** Whether body `i`'s bounding box overlaps `bounds`. */
+export function intersects(store: SharedComponentStore, i: number, bounds: QueryBounds): boolean {
+  const [minX, minY, maxX, maxY] = bodyBounds(store, i);
+  return (
+    maxX >= bounds.left && minX <= bounds.right && maxY >= bounds.top && minY <= bounds.bottom
+  );
+}
 
 /**
  * A growable scratch buffer for {@link queryVisible} results.

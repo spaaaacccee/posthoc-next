@@ -4,9 +4,23 @@ import type { Bounds, Point, Size } from "protocol";
 import type { LayerParams, LayerShading, SharedComponentStore } from "renderer";
 import { shadeOf } from "renderer";
 import type Flatbush from "flatbush";
-import type { DrawOptions } from "./columnarDraw";
+import type { DrawOptions, DrawTransform } from "./columnarDraw";
 import { buildLabelGrid, columnarDrawTransform, drawBody, screenPad } from "./columnarDraw";
-import { isStepInvariant, openIndex, packIndex, QueryScratch, queryVisible } from "./columnarIndex";
+import {
+  hasSortedStarts,
+  intersects,
+  isAccumulable,
+  isEphemeral,
+  isPersistent,
+  isStepInvariant,
+  openIndex,
+  packIndex,
+  QueryBounds,
+  QueryScratch,
+  queryVisible,
+  startLowerBound,
+  startUpperBound,
+} from "./columnarIndex";
 import { D2RendererEvents, D2RendererOptions, defaultD2RendererOptions } from "./D2RendererOptions";
 import { getTiles } from "./D2RendererWorker";
 import { EventEmitter } from "./EventEmitter";
@@ -50,6 +64,23 @@ type LayerTile = {
   height: number;
 };
 
+/**
+ * An accumulable layer's raster for one tile: every *persistent* body visible in
+ * it up to {@link step}, already drawn. Ephemerals are deliberately not here —
+ * they have to disappear again, so they are redrawn on top every step. See
+ * {@link isAccumulable} and `D2RendererV2Worker.#accumulate`.
+ */
+type AccTile = {
+  canvas: OffscreenCanvas;
+  ctx: OffscreenCanvasRenderingContext2D;
+  /** The playhead this raster has been drawn up to, inclusive. */
+  step: number;
+  /** Persistent bodies drawn so far. The tile's content hash rides on this. */
+  bodies: number;
+  width: number;
+  height: number;
+};
+
 type OpenLayer = Generation & {
   fb?: Flatbush;
   colors: Map<number, string>;
@@ -60,9 +91,26 @@ type OpenLayer = Generation & {
   invariant: boolean;
   /** Cached rasters, populated only when `invariant`. */
   tiles: Map<string, LayerTile>;
+  /** Every body is persistent or one-step-lived → its tiles can accumulate. */
+  accumulable: boolean;
+  /** `start` is non-decreasing in body index → a step delta is a contiguous range. */
+  sortedStarts: boolean;
+  /** Accumulated rasters, populated only when `accumulable`. */
+  acc: Map<string, AccTile>;
 };
 
 const MAX_TILE_CACHE = 512;
+
+/**
+ * Accumulated rasters held per monotone layer, per worker.
+ *
+ * Smaller than {@link MAX_LAYER_TILES} because these are live canvases that are
+ * *drawn into* rather than cache entries that can be recomputed cheaply — and
+ * because a worker only owns its own stride of the frustum, so a handful covers
+ * what it actually renders, plus slack for a pan. Evicting one costs a single
+ * full redraw the next time that tile is asked for.
+ */
+const MAX_ACC_TILES = 32;
 
 /**
  * The CSS size one tile covers on screen, at the tile grid's *nominal* density — the
@@ -212,6 +260,10 @@ export class D2RendererV2Worker extends EventEmitter<
       scratch: new QueryScratch(),
       invariant: isStepInvariant(gen.store),
       tiles: new Map(),
+      // Both O(count), once per generation, off the main thread.
+      accumulable: isAccumulable(gen.store),
+      sortedStarts: hasSortedStarts(gen.store),
+      acc: new Map(),
     });
     this.#dirty();
     this.#now++;
@@ -228,6 +280,7 @@ export class D2RendererV2Worker extends EventEmitter<
     layer.index = index;
     layer.fb = index ? openIndex(index) : undefined;
     layer.tiles.clear(); // what's visible in each tile just changed
+    layer.acc.clear();
     this.#dirty();
     this.#invalidate();
   }
@@ -268,7 +321,11 @@ export class D2RendererV2Worker extends EventEmitter<
     layer.store = { ...layer.store, ...shading };
     layer.colors.clear();
     layer.tiles.clear();
+    layer.acc.clear();
     layer.invariant = isStepInvariant(layer.store);
+    // A recolour can add or remove ramps, and a ramp is exactly what disqualifies
+    // a layer from accumulating — so this has to be recomputed, not assumed.
+    layer.accumulable = isAccumulable(layer.store);
     this.#dirty();
     this.#invalidate();
   }
@@ -324,7 +381,10 @@ export class D2RendererV2Worker extends EventEmitter<
       ("sizing" in params && !isEqual(params.sizing, layer.params.sizing)) ||
       ("label" in params && !isEqual(params.label, layer.params.label));
     layer.params = { ...layer.params, ...params };
-    if (raster) layer.tiles.clear();
+    if (raster) {
+      layer.tiles.clear();
+      layer.acc.clear();
+    }
     this.#dirty();
     this.#invalidate();
   }
@@ -485,13 +545,47 @@ export class D2RendererV2Worker extends EventEmitter<
         pixelScale,
       };
       const pad = screenPad(l.store, t.sx, opts);
-      const indices = queryVisible(
-        l.store,
-        l.fb!,
-        { top: top - pad, left: left - pad, right: right + pad, bottom: bottom + pad },
-        this.#step,
-        { scratch: l.scratch },
-      );
+      const padded: QueryBounds = {
+        top: top - pad,
+        left: left - pad,
+        right: right + pad,
+        bottom: bottom + pad,
+      };
+
+      // The accumulating path — the one a trace layer takes.
+      //
+      // The tile's persistent bodies only ever grow, so they are drawn *once* and
+      // then extended by each step's arrivals, rather than re-queried and
+      // re-rasterized from scratch. That is the difference between O(bodies ever
+      // visible in this tile) per frame — which grows with the playhead, and is
+      // what made a long trace slower and slower to play — and O(bodies that just
+      // arrived), which does not.
+      //
+      // This step's *ephemerals* (a `clear` transient, or a special cleared by the
+      // next step) come back separately: they have to disappear again, so they are
+      // never baked into the accumulation canvas, and are redrawn over it every
+      // step. Only one step's worth is ever alive, so that is a handful of bodies.
+      //
+      // Excluded when a label grid is on: the grid is a contest between all the
+      // bodies in the tile, decided in one pass, so it cannot be resolved one
+      // arrival at a time.
+      // `!l.invariant`: an invariant layer is an accumulable one whose bodies all
+      // open at step 0, and it has a strictly better deal available — its raster is
+      // drawn once and then never touched, where an accumulator would still walk
+      // the (empty) arrivals every step. Let it fall through and fill that cache.
+      if (!l.invariant && l.accumulable && l.fb && !opts.label?.grid) {
+        const acc = this.#accumulate(l, layerKey, padded, tile, t, opts);
+        const ephemeral = this.#ephemeralAt(l, padded, this.#step);
+        let h = acc.hash;
+        // The ephemerals are part of what this tile *looks like*, so they belong in
+        // its content hash — otherwise a tile whose only change is a highlight
+        // moving off it would be served from cache and the highlight would stick.
+        for (const i of ephemeral) h = Math.imul(h ^ (i >>> 0), 0x01000193) >>> 0;
+        h = Math.imul(h ^ ephemeral.length, 0x01000193) >>> 0;
+        return { l, acc, ephemeral, opts, hash: h >>> 0 };
+      }
+
+      const indices = queryVisible(l.store, l.fb!, padded, this.#step, { scratch: l.scratch });
       let h = 0x811c9dc5;
       const mix = (v: number) => {
         h = Math.imul(h ^ (v >>> 0), 0x01000193) >>> 0;
@@ -554,7 +648,13 @@ export class D2RendererV2Worker extends EventEmitter<
     // Layers with nothing in this tile don't affect the composite, so they don't
     // count against the fast path below — an empty overlay shouldn't force the
     // one layer that *does* have content through a sub-canvas.
-    const drawn = perLayer.filter((p) => (p.cached ? p.cached.canvas : p.indices!.length));
+    const drawn = perLayer.filter((p) =>
+      p.cached
+        ? p.cached.canvas
+        : p.acc
+          ? p.acc.bodies || p.ephemeral!.length
+          : p.indices!.length,
+    );
     for (const p of drawn) {
       const { l } = p;
       const alpha = l.params.alpha ?? 1;
@@ -564,6 +664,23 @@ export class D2RendererV2Worker extends EventEmitter<
 
       if (p.cached) {
         ctx.drawImage(p.cached.canvas!, 0, 0);
+        continue;
+      }
+      if (p.acc) {
+        // The persistent bodies are already drawn, on the accumulation canvas.
+        // This step's ephemerals go over the top — which is where they belong:
+        // an ephemeral born at step `s` outranks every persistent body visible at
+        // `s` (see `isAccumulable`), so this is the order a full redraw produces.
+        //
+        // Onto the shared sub-canvas when the layer composites with an alpha or a
+        // blend mode, so the raster and its ephemerals are composited as one image
+        // rather than each being blended separately.
+        const sole = drawn.length === 1 && alpha === 1 && mode === "source-over";
+        const target = sole ? ctx : ctx2;
+        if (!sole) ctx2.clearRect(0, 0, tile.width, tile.height);
+        target.drawImage(p.acc.canvas, 0, 0);
+        for (const i of p.ephemeral!) drawBody(l.store, i, target, t, l.colors, p.opts!);
+        if (!sole) ctx.drawImage(g2, 0, 0);
         continue;
       }
       const indices = p.indices!;
@@ -613,6 +730,168 @@ export class D2RendererV2Worker extends EventEmitter<
     const bitmap = g.transferToImageBitmap();
     this.#touch(key, { hash: nextHash, width: bitmap.width, height: bitmap.height });
     return { hash: nextHash, bitmap };
+  }
+
+  /**
+   * An accumulable layer's *persistent* bodies for one tile, as a raster that is
+   * extended rather than rebuilt.
+   *
+   * The first sight of a tile costs a full query and draw. Every step after that
+   * costs only the persistent bodies whose span opened since — which, for a
+   * playback, is a handful. Nothing already on the canvas is ever redrawn, because
+   * a persistent body cannot change once visible (see {@link isAccumulable}).
+   *
+   * Ephemerals are deliberately *not* drawn here. Baking a body that has to
+   * disappear into a canvas that is never cleared would leave it on screen for the
+   * rest of the trace; they are composited over this raster instead, by the caller.
+   *
+   * The returned `hash` folds the *persistent body count*, not the playhead: a tile
+   * that gained nothing this step hashes the same as last step, so `#renderTile`'s
+   * cache check short-circuits and no bitmap is sent at all. Since a search
+   * frontier is spatially local, most tiles on screen are in exactly that position
+   * on any given step.
+   */
+  #accumulate(
+    l: OpenLayer,
+    key: string,
+    padded: QueryBounds,
+    tile: Size,
+    t: DrawTransform,
+    opts: DrawOptions,
+  ): AccTile & { hash: number } {
+    const step = this.#step;
+    let a = l.acc.get(key);
+
+    // A scrub backwards un-draws bodies, which an accumulation canvas cannot do;
+    // a resize invalidates the pixels outright. Either way: start again.
+    if (a && (a.step > step || a.width !== tile.width || a.height !== tile.height)) {
+      l.acc.delete(key);
+      a = undefined;
+    }
+
+    if (!a) {
+      const canvas = new OffscreenCanvas(tile.width, tile.height);
+      const ctx = canvas.getContext("2d")!;
+      ctx.imageSmoothingEnabled = false;
+      // The one full draw. Via the spatial index, which is cheaper here than
+      // walking every body whose span has already opened. Persistent bodies only —
+      // an ephemeral that happened to be alive at this step must not be baked in.
+      const indices = queryVisible(l.store, l.fb!, padded, step, { scratch: l.scratch });
+      let bodies = 0;
+      for (const i of indices) {
+        if (!isPersistent(l.store, i)) continue;
+        drawBody(l.store, i, ctx, t, l.colors, opts);
+        bodies++;
+      }
+      a = { canvas, ctx, step, bodies, width: tile.width, height: tile.height };
+      this.#touchAcc(l, key, a);
+    } else if (step > a.step) {
+      a.bodies += this.#drawArrivals(l, a.ctx, t, opts, padded, a.step, step);
+      a.step = step;
+      this.#touchAcc(l, key, a); // LRU: it was used
+    }
+
+    let h = 0x811c9dc5;
+    const mix = (v: number) => {
+      h = Math.imul(h ^ (v >>> 0), 0x01000193) >>> 0;
+    };
+    mix(l.generation);
+    mix(a.bodies);
+    mix(Math.round((opts.pixelScale ?? 1) * 1024));
+    return { ...a, hash: h >>> 0 };
+  }
+
+  /**
+   * The ephemerals alive at `step` that overlap `padded`, in ascending index order.
+   *
+   * A body is ephemeral iff its span is `[s, s+1)`, so the ones alive at `step` are
+   * exactly those *born* at `step` — a contiguous index range under sorted starts,
+   * and a tiny one: a single step's worth of components.
+   */
+  #ephemeralAt(l: OpenLayer, padded: QueryBounds, step: number): number[] {
+    const { store } = l;
+    const out: number[] = [];
+    if (l.sortedStarts) {
+      const lo = startLowerBound(store, step);
+      const hi = startUpperBound(store, step);
+      for (let i = lo; i < hi; i++) {
+        if (!isEphemeral(store, i)) continue;
+        if (!intersects(store, i, padded)) continue;
+        out.push(i);
+      }
+      return out;
+    }
+    const hits = l.fb!.search(
+      padded.left,
+      padded.top,
+      padded.right,
+      padded.bottom,
+      (i) => store.start[i]! === step && isEphemeral(store, i),
+    );
+    return [...hits].sort((x, y) => x - y);
+  }
+
+  /**
+   * Draw the *persistent* bodies that became visible in `(from, to]` and overlap
+   * `padded`, returning how many were drawn.
+   *
+   * With sorted starts those bodies are a contiguous index range, so this costs
+   * O(arrivals) — no spatial query at all. That matters beyond the draw: the
+   * Flatbush filter visits *every* candidate box in the tile whatever the playhead
+   * is doing, so a per-step query costs O(bodies ever in this tile) even on a step
+   * where nothing arrived. On a 717k-body trace that query was the single largest
+   * worker cost even at the *start* of a playback, with almost nothing on screen.
+   *
+   * Bodies are drawn in ascending index order, matching the sorted order the
+   * one-shot path draws in — so a tile looks the same however it was built.
+   */
+  #drawArrivals(
+    l: OpenLayer,
+    ctx: OffscreenCanvasRenderingContext2D,
+    t: DrawTransform,
+    opts: DrawOptions,
+    padded: QueryBounds,
+    from: number,
+    to: number,
+  ): number {
+    const { store } = l;
+    let drawn = 0;
+    if (l.sortedStarts) {
+      const lo = startUpperBound(store, from);
+      const hi = startUpperBound(store, to);
+      for (let i = lo; i < hi; i++) {
+        if (!isPersistent(store, i)) continue;
+        if (!intersects(store, i, padded)) continue;
+        drawBody(store, i, ctx, t, l.colors, opts);
+        drawn++;
+      }
+      return drawn;
+    }
+    // Unsorted starts (no packer produces these today, but the store's contract
+    // permits them): fall back to the index, filtered to this step range.
+    const hits = l.fb!.search(
+      padded.left,
+      padded.top,
+      padded.right,
+      padded.bottom,
+      (i) => store.start[i]! > from && store.start[i]! <= to && isPersistent(store, i),
+    );
+    hits.sort((x, y) => x - y);
+    for (const i of hits) {
+      drawBody(store, i, ctx, t, l.colors, opts);
+      drawn++;
+    }
+    return drawn;
+  }
+
+  /** Hold an accumulable layer's accumulation canvas for this tile, LRU-bounded. */
+  #touchAcc(layer: OpenLayer, key: string, value: AccTile) {
+    layer.acc.delete(key);
+    layer.acc.set(key, value);
+    if (layer.acc.size > MAX_ACC_TILES) {
+      const oldest = layer.acc.keys().next().value;
+      if (oldest !== undefined) layer.acc.delete(oldest);
+    }
   }
 
   /** Cache a step-invariant layer's raster for this tile, LRU-bounded. */
