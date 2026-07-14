@@ -1,7 +1,7 @@
-import { Sema } from "async-sema";
 import { clamp } from "es-toolkit/compat";
 import { settings as settingsStore } from "slices/settings";
 import { endpointSymbol } from "vite-plugin-comlink/symbol";
+import { Permit, Sema } from "workers/semaphore";
 
 /**
  * Generic worker concurrency limiter.
@@ -158,7 +158,7 @@ function laneSema(name: LaneName, workerCount: number = resolveWorkerCount()): S
 export type WorkerLease<T> = {
   /** The spawned workers (one per acquired permit). */
   workers: T[];
-  /** Idempotent: terminates every worker and releases every token, 1:1. */
+  /** Idempotent: terminates every worker and releases every permit, 1:1. */
   release: () => void;
   /**
    * Rejects with a {@link WorkerCrashError} if any leased worker crashes (fires
@@ -181,22 +181,22 @@ export type LeaseOptions = {
 
 /**
  * Acquire one permit, aborting the wait if `signal` fires. If the abort wins the
- * race the underlying `acquire()` is still pending, so we release its token once
- * it eventually resolves — never leaking a permit.
+ * race the underlying `acquire()` is still pending, so we release its permit once
+ * it eventually resolves — never leaking one.
  */
-async function acquireOrAbort(sema: Sema, signal?: AbortSignal): Promise<unknown | null> {
+async function acquireOrAbort(sema: Sema, signal?: AbortSignal): Promise<Permit | null> {
   if (signal?.aborted) return null;
   const acquired = sema.acquire();
   if (!signal) return acquired;
   const aborted = new Promise<null>((resolve) =>
     signal.addEventListener("abort", () => resolve(null), { once: true }),
   );
-  const winner = await Promise.race([acquired.then((token) => ({ token })), aborted]);
+  const winner = await Promise.race([acquired.then((permit) => ({ permit })), aborted]);
   if (winner === null) {
-    acquired.then((token) => sema.release(token)).catch(() => {});
+    acquired.then((permit) => sema.release(permit)).catch(() => {});
     return null;
   }
-  return winner.token;
+  return winner.permit;
 }
 
 /**
@@ -213,7 +213,7 @@ export async function leaseWorkers<T>(
   { workerCount, min = 1, max = Infinity, signal }: LeaseOptions,
 ): Promise<WorkerLease<T> | null> {
   const sema = laneSema(lane, workerCount);
-  const tokens: unknown[] = [];
+  const permits: Permit[] = [];
   const workers: T[] = [];
   let released = false;
   let watch: CrashWatch | undefined;
@@ -230,32 +230,32 @@ export async function leaseWorkers<T>(
         console.warn(e);
       }
     }
-    for (const t of tokens) sema.release(t);
+    for (const p of permits) sema.release(p);
     workers.length = 0;
-    tokens.length = 0;
+    permits.length = 0;
   };
 
   // Blocking acquire of the minimum, abortable.
   for (let i = 0; i < min; i++) {
-    const token = await acquireOrAbort(sema, signal);
-    if (token === null) {
+    const permit = await acquireOrAbort(sema, signal);
+    if (permit === null) {
       release();
       return null;
     }
-    tokens.push(token);
+    permits.push(permit);
   }
   // Greedily grab whatever else is free right now.
-  while (tokens.length < max) {
-    const token = sema.tryAcquire();
-    if (token === undefined) break;
-    tokens.push(token);
+  while (permits.length < max) {
+    const permit = sema.tryAcquire();
+    if (permit === undefined) break;
+    permits.push(permit);
   }
   if (signal?.aborted) {
     release();
     return null;
   }
 
-  for (let i = 0; i < tokens.length; i++) workers.push(spawn());
+  for (let i = 0; i < permits.length; i++) workers.push(spawn());
   watch = watchCrash(workers);
   signal?.addEventListener("abort", release, { once: true });
   return { workers, release, crashed: watch.crashed };
