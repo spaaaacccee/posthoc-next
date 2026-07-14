@@ -114,6 +114,22 @@ describe("resolveWorkerCount", () => {
     expect(resolveWorkerCount()).toBe(8);
   });
 
+  it("applies the same rules to a value passed in as to the live setting", () => {
+    // `useTraceStream` reads the setting reactively and passes the value here, so
+    // the two must agree — if they can drift, the `trace-gen` lane is rebuilt on
+    // every stream and its cap stops bounding anything.
+    setHardwareConcurrency(32);
+    setWorkerCount(undefined);
+
+    expect(resolveWorkerCount(6)).toBe(6);
+    // ≤1 is the "auto" sentinel here too, not a request for one worker.
+    expect(resolveWorkerCount(1)).toBe(8);
+    expect(resolveWorkerCount(undefined)).toBe(8);
+    // And an explicit value overrides the setting rather than reading past it.
+    setWorkerCount(3);
+    expect(resolveWorkerCount(6)).toBe(6);
+  });
+
   it("clamps the auto estimate to [1, 12]", () => {
     setWorkerCount(1);
 
@@ -230,6 +246,20 @@ describe("leaseWorkers", () => {
     expect(await free("compress")).toBe(1);
   });
 
+  it("clamps `min` to the lane's cap instead of waiting on a permit that cannot exist", async () => {
+    // `compress` has a cap of 1. Asking for 3 used to block forever on the second:
+    // the lane can never issue it, and with no signal there is nothing to break the
+    // wait — a deadlock with no way out. Take the whole lane instead.
+    const f = fleet();
+    const granted = (await lease("compress", f, { min: 3 }))!;
+
+    expect(granted.workers).toHaveLength(1);
+    expect(f.spawned).toHaveLength(1);
+
+    granted.release();
+    expect(await free("compress")).toBe(1);
+  });
+
   it("returns null and spawns nothing when the signal is already aborted", async () => {
     const f = fleet();
     const result = await lease("map-parse", f, { signal: AbortSignal.abort() });
@@ -242,25 +272,29 @@ describe("leaseWorkers", () => {
   it("gives back the permits it already holds when a blocked lease is aborted", async () => {
     const held = fleet();
     const blocked = fleet();
-    const lane = (await lease("hash", held, { min: 1 }))!;
+    // `parse` caps at 2. Hold one of them, so a lease asking for both takes the
+    // free permit and then parks in the blocking loop waiting on the second.
+    // (The lane has to be this wide: `min` is clamped to the cap now, so a lease
+    // can no longer park on a permit the lane could never issue at all.)
+    const lane = (await lease("parse", held, { min: 1, max: 1 }))!;
     const controller = new AbortController();
 
-    // `hash` caps at 1, so the second permit can never arrive: the lease parks
-    // in the blocking loop holding permit #1.
-    const pending = lease("hash", blocked, { min: 2, signal: controller.signal });
-    lane.release();
+    const pending = lease("parse", blocked, { min: 2, max: 2, signal: controller.signal });
     await flush();
 
-    expect(await free("hash")).toBe(0);
+    expect(await free("parse")).toBe(0);
 
     controller.abort();
 
     expect(await pending).toBeNull();
     expect(blocked.spawned).toEqual([]);
     await flush();
-    // The abandoned `acquire()` still resolves later; its permit must be
-    // returned or the lane is wedged for the rest of the session.
-    expect(await free("hash")).toBe(1);
+
+    lane.release();
+    await flush();
+    // The abandoned `acquire()` still resolves later; its permit must be returned
+    // or the lane is wedged for the rest of the session.
+    expect(await free("parse")).toBe(2);
   });
 
   it("terminates and releases at most once, however often release is called", async () => {

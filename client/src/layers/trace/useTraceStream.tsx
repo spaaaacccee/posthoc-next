@@ -1,4 +1,3 @@
-import { clamp, floor } from "es-toolkit/compat";
 import { nanoid } from "nanoid";
 import { EventContext } from "protocol";
 import { Trace } from "protocol/Trace-v140";
@@ -6,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { slice } from "slices";
 import { useOne } from "slices/useOne";
 import { set } from "utils/set";
+import { resolveWorkerCount } from "workers/workerLanes";
 import {
   createTraceStream,
   StreamBatchFrame,
@@ -26,8 +26,6 @@ const COMMIT_FLOOR_MS = 2000;
 const { max } = Math;
 
 type ProduceFn = (f: (l: any) => void) => void;
-
-const autoWorkerCount = () => clamp(floor(navigator.hardwareConcurrency / 4), 1, 12);
 
 /**
  * Streams a v1.4.0 trace's render components into an external buffer store
@@ -67,10 +65,12 @@ export function useTraceStream({
   produce: ProduceFn;
 }) {
   const settings = useOne(slice.settings);
-  const settingCount = settings["performance/workerCount"];
-  // The stored default is 1 (and the renderer overrides it the same way); treat
-  // <= 1 as "auto" so component generation actually fans out across cores.
-  const workerCount = settingCount && settingCount > 1 ? settingCount : autoWorkerCount();
+  // Read reactively — the stream restarts when the setting changes — but sized by
+  // the same function the lanes use. The formula lived here as well, and if the
+  // two copies had ever disagreed the `trace-gen` lane would have been rebuilt on
+  // every stream, losing its cap entirely. (A configured value <= 1 means "auto":
+  // the stored default is 1, so component generation still fans out across cores.)
+  const workerCount = resolveWorkerCount(settings["performance/workerCount"]);
 
   // `produce` is a fresh closure each render; keep the latest in a ref so the
   // setup effect doesn't have to depend on it (which would restart the stream

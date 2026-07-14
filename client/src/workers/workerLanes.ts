@@ -107,13 +107,22 @@ function watchCrash(workers: readonly unknown[]): CrashWatch {
 }
 
 /**
- * The preferred worker count, read live from settings. Mirrors `useTraceStream`:
- * a configured value ≤1 means "auto" — a fraction of the hardware threads,
- * clamped to a sane range. Lane callers no longer need to thread this through;
- * leases resolve it here so every lane is sized consistently.
+ * The preferred worker count. A configured value ≤1 means "auto" — a fraction of
+ * the hardware threads, clamped to a sane range.
+ *
+ * `configured` defaults to a live read of the setting, so lane callers need not
+ * thread it through. It is a parameter rather than always a live read because
+ * `useTraceStream` has to observe the setting *reactively* (it restarts the
+ * stream when it changes) and so already holds the value — and this formula must
+ * not exist twice. When it did, the two copies agreed only by having been copied:
+ * had either drifted, `leaseWorkers("trace-gen", { workerCount })` would have
+ * computed a different cap than the lane's default, rebuilding the lane on every
+ * call and handing each lease a fresh full-capacity semaphore — a lane whose cap
+ * bounds nothing at all.
  */
-export function resolveWorkerCount(): number {
-  const configured = settingsStore.get((s) => s["performance/workerCount"]);
+export function resolveWorkerCount(
+  configured: number | undefined = settingsStore.get((s) => s["performance/workerCount"]),
+): number {
   return configured && configured > 1
     ? configured
     : clamp(floor(navigator.hardwareConcurrency / 4), 1, 12);
@@ -146,13 +155,13 @@ const lanes = new Map<LaneName, { sema: Sema; cap: number }>();
  * harmlessly, so a live settings change is safe (it just takes effect for
  * subsequent leases).
  */
-function laneSema(name: LaneName, workerCount: number = resolveWorkerCount()): Sema {
+function laneSema(name: LaneName, workerCount: number = resolveWorkerCount()) {
   const cap = laneCap(name, workerCount);
   const existing = lanes.get(name);
-  if (existing && existing.cap === cap) return existing.sema;
+  if (existing && existing.cap === cap) return existing;
   const entry = { sema: new Sema(cap), cap };
   lanes.set(name, entry);
-  return entry.sema;
+  return entry;
 }
 
 export type WorkerLease<T> = {
@@ -212,7 +221,7 @@ export async function leaseWorkers<T>(
   terminate: (worker: T) => void,
   { workerCount, min = 1, max = Infinity, signal }: LeaseOptions,
 ): Promise<WorkerLease<T> | null> {
-  const sema = laneSema(lane, workerCount);
+  const { sema, cap } = laneSema(lane, workerCount);
   const permits: Permit[] = [];
   const workers: T[] = [];
   let released = false;
@@ -236,7 +245,13 @@ export async function leaseWorkers<T>(
   };
 
   // Blocking acquire of the minimum, abortable.
-  for (let i = 0; i < min; i++) {
+  //
+  // Clamped to the cap: a lane can never issue more permits than it has, so a
+  // larger `min` would block on one that cannot arrive — and with no `signal` to
+  // break the wait, that is a deadlock with no way out. Take the whole lane
+  // instead, which is the most the caller could ever have been given.
+  const required = Math.min(min, cap);
+  for (let i = 0; i < required; i++) {
     const permit = await acquireOrAbort(sema, signal);
     if (permit === null) {
       release();
