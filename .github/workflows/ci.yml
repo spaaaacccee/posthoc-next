@@ -43,15 +43,12 @@ jobs:
   test:
     name: Test (vitest)
     runs-on: ubuntu-latest
-    # NOTE: report-only for now. The renderer/parser test suites have
-    # pre-existing failures unrelated to app behaviour. Remove this line
-    # to make tests a required gate once those are fixed.
-    continue-on-error: true
+    # A required gate. `bun run test` at the root runs every package's suite
+    # (client, internal-renderers, adapter-iron-harvest) through one vitest.
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - run: bun i
-      - run: bunx vitest run
-        working-directory: client
+      - run: bun run test

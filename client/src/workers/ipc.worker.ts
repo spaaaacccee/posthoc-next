@@ -1,20 +1,10 @@
 import { once } from "es-toolkit";
-import { delay, now } from "es-toolkit/compat";
 import { Request, Response } from "protocol/Message";
 import { Transport } from "client/Transport";
-
-function wait(ms: number) {
-  return new Promise((res) => delay(res, ms));
-}
-
-async function timed<T>(task: () => Promise<T>, ms: number = 500) {
-  const from = now();
-  const result = (await Promise.any([task(), wait(ms)])) as T | undefined;
-  return { result, delta: now() - from };
-}
+import { timed } from "utils/timed";
 
 const init = once(async (url: string = "") => {
-  const { result } = await timed(() => import(/* @vite-ignore */ url));
+  const { result } = await timed(() => import(/* @vite-ignore */ url), 500);
   if (result) {
     const fn = (...args: unknown[]) => result.call(...args);
     return fn as Transport["call"];

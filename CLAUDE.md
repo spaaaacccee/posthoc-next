@@ -22,7 +22,7 @@ bun run lint         # oxlint
 bun run lint:fix     # oxlint --fix
 bun run format       # oxfmt (format in place)
 bun run format:check # oxfmt --check
-bun run test         # vitest (watch)
+bun run test         # vitest (watch) — this package only
 bunx vitest run path/to/file.test.ts          # run one test file once
 bunx vitest run -t "name of the test"          # run tests matching a name
 sh ./package.sh      # package Electron binaries for win/linux/mac (electron-packager)
@@ -30,13 +30,18 @@ sh ./package.sh      # package Electron binaries for win/linux/mac (electron-pac
 
 From the root: `bun start` and `bun run build:all` proxy into `client/`.
 
+**Tests run from the root.** `bun run test` runs every package's suite (`client`,
+`internal-renderers`, `adapter-iron-harvest`) through one vitest, composed by the
+root `vitest.config.ts` as vitest `projects`. That is what CI runs, and it is a
+required gate. A package's own `bun run test` covers that package alone.
+
 **The build does not typecheck.** `vite build` uses esbuild/rolldown and transpiles without type checking, so type errors do not fail the build and there is no typecheck in CI. Run `bun run typecheck` explicitly to find them — expect pre-existing errors in app code that are latent for this reason. `vite.config.ts` itself is excluded from `tsconfig.json`'s `include`.
 
 ## Tooling notes
 
 - **Linting/formatting is oxc** (oxlint + oxfmt), configured from oxc defaults in `client/.oxlintrc.json` and `client/.oxfmtrc.json`. There is no ESLint or Prettier. oxfmt normalizes line endings to LF.
 - **React Compiler** is enabled via `babel-plugin-react-compiler` in `client/vite.config.ts`. Be mindful of the rules of React; the compiler memoizes automatically.
-- Tests run under Vitest + jsdom (`client/setupTests.ts`).
+- Tests run under Vitest + jsdom. Setup files live at `<package>/src/setupTests.ts` — `client`'s is an inert stub, `internal-renderers`' shims `OffscreenCanvas` and `FontFace`, which the render workers need.
 
 ## Import conventions
 
@@ -53,7 +58,7 @@ The contract between the app and its data sources is the `protocol` package; eve
 
 ## Client architecture (`client/src`)
 
-- **State — `slices/`.** Custom state system built on `createSlice` (`slices/createSlice.tsx`): React Context + reducer with a per-slice "commit id" used to detect changes. Slices are exposed as `[useX, XProvider]` pairs and composed as nested providers (`slices/index.ts`, `slices/SliceProvider.tsx`). Some stores (`layers`, `ui`, `view`, `settings`, `loading`) are davstack/zustand stores instead. Read `slices/createSlice.tsx` before touching state.
+- **State — `slices/`.** davstack/zustand stores (`layers`, `ui`, `view`, `settings`, `loading`, …), composed in `slices/index.ts` / `slices/SliceProvider.tsx`. `slices/selector.ts` (`createSelector`, `id`) is the shared read/write surface — `layers.one(key)` and friends all route through it, so read it before touching state. (The old `createSlice.tsx` React-Context/reducer system this file used to describe is gone.)
 - **Services — `services/`.** Headless React components (rendered once, no UI) that own side effects and wiring: `BootstrapService`, `ConnectionsService`, `RendererService`, `SyncService` (cross-tab/collab via `sysend`), `BreakpointService`, etc. Add cross-cutting runtime behavior here, not in pages.
 - **Layers — `layers/`.** A visualization is a stack of layers (`trace`, `map`, `query`), driven by `LayerController`/`RenderLayer` and the `layers` store. This is the central data model the user manipulates.
 - **Pages — `pages/`.** Routed views (`tree`, `visual-scripting`, `steps`, viewport, settings, etc.).

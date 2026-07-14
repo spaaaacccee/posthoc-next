@@ -1,7 +1,7 @@
 import { defaultD2RendererOptions } from "d2-renderer/D2RendererOptions";
 import { D2RendererV2Worker, D2V2WorkerEvent, tileCssSize } from "d2-renderer/D2RendererV2Worker";
 import type { SharedComponentStore } from "renderer";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const f32 = (a: number[]) => {
   const t = new Float32Array(new SharedArrayBuffer(a.length * 4));
@@ -94,10 +94,28 @@ function countCanvases(fn: () => void): number {
   return n;
 }
 
+/**
+ * Every worker a test makes, so it can be disposed after it.
+ *
+ * A worker left alive keeps its *trailing* render throttle armed, and that
+ * render allocates surfaces whenever it eventually fires. {@link countCanvases}
+ * counts allocations by swapping the global `OffscreenCanvas`, so a stray render
+ * from an earlier test landing inside a later test's counting window inflates
+ * that test's count — a failure whose cause is in a different test, and which
+ * only shows up when the box is loaded enough for the timer to drift into range.
+ */
+const live: D2RendererV2Worker[] = [];
+
+afterEach(() => {
+  for (const w of live) w.dispose();
+  live.length = 0;
+});
+
 function makeWorker(options: { workerCount?: number; workerIndex?: number } = {}) {
   const worker = new D2RendererV2Worker();
   worker.setup({ ...defaultD2RendererOptions, workerCount: 1, workerIndex: 0, ...options });
   worker.setFrustum({ top: 0, left: 0, bottom: 512, right: 512 });
+  live.push(worker);
   return worker;
 }
 

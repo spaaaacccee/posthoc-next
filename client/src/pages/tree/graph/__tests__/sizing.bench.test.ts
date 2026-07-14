@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pxSize } from "internal-renderers/src/d2-renderer/columnarDraw";
@@ -29,8 +29,14 @@ import { buildGraphStore, type NodeLayout } from "../buildGraphStore";
  * scale here would model a renderer we deliberately do not have.
  */
 
-const TRACE = resolve(__dirname, "../../../../../../experiments/astar-network.trace.yaml");
-const suite = existsSync(TRACE) ? describe : describe.skip;
+// A tracked fixture, not a gitignored `experiments/` one: the thresholds below are
+// calibrated against *this* graph's node count and extent, so it has to travel with
+// the test or the suite silently skips itself everywhere but the box it was written on.
+const TRACE = resolve(
+  import.meta.dirname,
+  "../../../../../../resources/traces/v1.4.0/astar-network.trace.yaml",
+);
+const suite = describe;
 
 const TILE = 256; // devicePixelRatio(2) * TILE_RESOLUTION(128), per GraphRenderer
 const SUBDIVISION = 3;

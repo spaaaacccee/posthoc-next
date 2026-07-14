@@ -15,7 +15,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "start": "cd client && bun start",
-    "build:all": "cd client && bun run build"
+    "build:all": "cd client && bun run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "trustedDependencies": [
     "bufferutil",
@@ -40,6 +42,9 @@
   "dependencies": {
     "flatbush": "^4.6.2",
     "typescript": "^7.0.1-rc"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
   },
   "overrides": {
     "immer": "11.1.8"

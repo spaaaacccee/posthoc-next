@@ -39,7 +39,7 @@ const PIXEL_SCALE = TILE.width / (SCREEN / 2 ** (SUBDIVISION + 0.5));
  * tile does by *what is on screen*, not by how big the trace is.
  */
 
-const TRACE = resolve(__dirname, "../../../../../../experiments/700k-nodes.trace.json");
+const TRACE = resolve(import.meta.dirname, "../../../../../../experiments/700k-nodes.trace.json");
 
 const ms = (f: () => void) => {
   const t = performance.now();
@@ -47,7 +47,25 @@ const ms = (f: () => void) => {
   return performance.now() - t;
 };
 
-const suite = existsSync(TRACE) ? describe : describe.skip;
+/**
+ * Opt-in: the fixture is a 52MB local artifact under the gitignored `experiments/`,
+ * so this suite cannot run on CI or a fresh clone. Everything else in the repo runs
+ * everywhere — this one does not, and a silent `describe.skip` reads exactly like a
+ * pass. Say so out loud instead.
+ *
+ * The synthetic-fixture shortcut is not open here: "spreads a *clustered* graph across
+ * workers" is only a real assertion against genuinely clustered data. A uniform point
+ * cloud would satisfy it trivially and prove nothing.
+ */
+const available = existsSync(TRACE);
+if (!available) {
+  console.warn(
+    `\n[scale suite SKIPPED] ${TRACE} not found.\n` +
+      `  717k-event index/query scaling is NOT covered by this run.\n` +
+      `  Drop a >700k-event v1.4.0 trace at that path to exercise it.\n`,
+  );
+}
+const suite = available ? describe : describe.skip;
 
 suite("scale: 717k events, plot mode", () => {
   const trace = JSON.parse(readFileSync(TRACE, "utf8")) as Trace;

@@ -5,10 +5,11 @@ import { comlink } from "vite-plugin-comlink";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig(({ mode }) => ({
-  root: path.join(process.cwd(), "./src"),
+  // Anchored to this file, not the cwd, so the root runner can load it.
+  root: path.join(import.meta.dirname, "./src"),
   publicDir: mode === "development" ? "public-dev" : "public",
   base: "./",
-  build: { outDir: path.join(process.cwd(), "./dist") },
+  build: { outDir: path.join(import.meta.dirname, "./dist") },
   resolve: { tsconfigPaths: true },
   plugins: [
     // Comlink must be one of the first plugins so it can transform worker
@@ -28,13 +29,17 @@ export default defineConfig(({ mode }) => ({
     },
   ],
   test: {
+    name: "client",
     globals: true,
+    // These suites are CPU-bound and the workspace runs three projects at once, so
+    // the 5s default is tight enough that a loaded box fails a passing test.
+    testTimeout: 20_000,
     server: {
       deps: {
         inline: ["vitest-canvas-mock"],
       },
     },
-    setupFiles: "./setupTests.ts",
+    setupFiles: path.join(import.meta.dirname, "./src/setupTests.ts"),
     environment: "jsdom",
     environmentOptions: {
       jsdom: {

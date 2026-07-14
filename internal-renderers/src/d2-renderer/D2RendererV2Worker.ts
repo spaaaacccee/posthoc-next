@@ -292,6 +292,10 @@ export class D2RendererV2Worker extends EventEmitter<
     if (this.#stepTimer !== undefined) clearInterval(this.#stepTimer);
     this.#stepTimer = undefined;
     this.#stepView = undefined;
+    // The render queue is a *trailing* throttle, so an invalidation can leave a
+    // render scheduled behind it. A disposed worker must not still rasterize:
+    // it allocates surfaces, and it does so after everyone stopped listening.
+    this.#getRenderQueue().cancel();
   }
 
   /** Add or replace a layer's generation. */

@@ -1,19 +1,22 @@
-/// <reference types="vitest" />
-
 import path from "path";
-import { UserConfig } from "vite";
-import viteTsconfigPaths from "vite-tsconfig-paths";
+import { defineConfig } from "vitest/config";
 
-export default {
-  root: path.join(process.cwd(), "./src"),
-  plugins: [viteTsconfigPaths()],
+export default defineConfig({
+  // Anchored to this file, not the cwd, so the root runner can load it.
+  root: path.join(import.meta.dirname, "./src"),
+  resolve: { tsconfigPaths: true },
   test: {
+    name: "internal-renderers",
     globals: true,
-    deps: {
-      inline: ["vitest-canvas-mock"],
+    // These suites are CPU-bound and the workspace runs three projects at once, so
+    // the 5s default is tight enough that a loaded box fails a passing test.
+    testTimeout: 20_000,
+    server: {
+      deps: {
+        inline: ["vitest-canvas-mock"],
+      },
     },
-    threads: false,
-    setupFiles: "./setupTests.ts",
+    setupFiles: path.join(import.meta.dirname, "./src/setupTests.ts"),
     environment: "jsdom",
     environmentOptions: {
       jsdom: {
@@ -21,4 +24,4 @@ export default {
       },
     },
   },
-} as UserConfig;
+});
