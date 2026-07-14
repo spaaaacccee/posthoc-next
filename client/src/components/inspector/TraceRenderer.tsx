@@ -61,7 +61,7 @@ const TILE_RESOLUTION = 128;
 const tile = devicePixelRatio * 1.5 * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
 
 const rendererOptions = {
-  tileSubdivision: isMobile ? 1 : 2,
+  tileSubdivision: 2,
   // Use almost all CPUs
   workerCount: clamp(navigator.hardwareConcurrency - 1, 1, 12),
   tileResolution: { width: tile, height: tile },

@@ -49,8 +49,9 @@ const TILE_RESOLUTION = 128;
 const tile = devicePixelRatio * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
 
 const rendererOptions: Partial<D2RendererOptions> = {
-  tileSubdivision: isMobile ? 2 : 3,
-  workerCount: clamp(floor(navigator.hardwareConcurrency / 4), 1, 12),
+  tileSubdivision: 2,
+  // Use almost all CPUs
+  workerCount: clamp(navigator.hardwareConcurrency - 1, 1, 12),
   tileResolution: { width: tile, height: tile },
   dynamicResolution: { ...defaultD2RendererOptions.dynamicResolution, enabled: false },
 };
