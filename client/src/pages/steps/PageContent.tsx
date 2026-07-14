@@ -26,6 +26,9 @@ import { getStreamBuffers } from "layers/trace/traceStreamStore";
 import { result } from "utils/result";
 import { useOne } from "slices/useOne";
 
+/** Time constant of the playback follow-scroll, in ms — see the loop below. */
+const FOLLOW_TIME_CONSTANT = 150;
+
 export function PageContent({ layer: key }: { layer?: string }) {
   const { spacing } = useTheme();
   const paper = usePaper();
@@ -124,31 +127,52 @@ export function PageContent({ layer: key }: { layer?: string }) {
     [rawSteps, _selectedType, highlighting, showHighlighting, isHighlighting],
   );
 
+  // The follow loop reads these, so it never has to be rebuilt when they change.
+  const followRef = useRef({ step, stepToFilteredStep, headerHeight });
+  followRef.current = { step, stepToFilteredStep, headerHeight };
+
+  // While playing, one rAF loop eases the list toward the playhead.
+  //
+  // Keyed on `playing` alone, *not* on `step`: keyed on `step` it tore itself
+  // down and started a fresh rAF loop on every single event of the playback.
+  //
+  // The easing amount is derived from the frame delta rather than from the raw
+  // rAF timestamp. The timestamp is milliseconds since page load, so using it
+  // directly made the follow speed a function of how long the tab had been
+  // open — imperceptibly slow on a fresh page, and (once `lerp`'s clamp took
+  // over, ~16 minutes in) an instant snap that dragged the whole virtual window
+  // across the list every frame. `1 - exp(-dt/tau)` is the frame-rate
+  // independent form: the same easing whatever the frame rate, forever.
   useEffect(() => {
-    if (!stepToFilteredStep || !ready || !ref.current) return;
-    const i = stepToFilteredStep(step!);
-    if (playing) {
-      let cancelled = false;
-      const target = headerHeight + i * ITEM_HEIGHT;
-      const f = (timestamp: DOMHighResTimeStamp) => {
-        if (cancelled || isUndefined(step) || !ref.current) return;
-        const scrollTop = ref.current.getScrollTop();
-        ref.current.scrollTo({
-          top: lerp(scrollTop, target, 0.000001 * timestamp),
+    if (!playing || !ready) return;
+    let frame = 0;
+    let previous = performance.now();
+    const f = (now: DOMHighResTimeStamp) => {
+      const delta = now - previous;
+      previous = now;
+      const list = ref.current;
+      const { step, stepToFilteredStep, headerHeight } = followRef.current;
+      if (list && stepToFilteredStep && !isUndefined(step)) {
+        const target = headerHeight + stepToFilteredStep(step) * ITEM_HEIGHT;
+        list.scrollTo({
+          top: lerp(list.getScrollTop(), target, 1 - Math.exp(-delta / FOLLOW_TIME_CONSTANT)),
         });
-        requestAnimationFrame(f);
-      };
-      requestAnimationFrame(f);
-      return () => {
-        cancelled = true;
-      };
-    }
+      }
+      frame = requestAnimationFrame(f);
+    };
+    frame = requestAnimationFrame(f);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, ready]);
+
+  // Paused: jump to the playhead whenever it moves.
+  useEffect(() => {
+    if (playing || !ready || !stepToFilteredStep || !ref.current || isUndefined(step)) return;
     ref.current.scrollToIndex({
-      index: i,
+      index: stepToFilteredStep(step),
       behavior: "smooth",
       offset: -pxToInt(spacing(12 + PADDING_TOP)),
     });
-  }, [step, ready, stepToFilteredStep, playing, spacing, headerHeight]);
+  }, [step, ready, stepToFilteredStep, playing, spacing]);
 
   return (
     <>

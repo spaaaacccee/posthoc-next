@@ -13,6 +13,7 @@ import { useCache } from "hooks/useCache";
 import { MenuCloseContext } from "hooks/useMenuClose";
 import { SelectionInfoProvider } from "layers/LayerController";
 import { getController } from "layers/layerControllers";
+import { isEqual } from "es-toolkit";
 import { toPairs as entries, map, merge, reduce, sortBy } from "es-toolkit/compat";
 import { ComponentProps, ReactNode, useMemo } from "react";
 import { slice } from "slices";
@@ -139,7 +140,16 @@ type SelectionInfoProviderProps = ComponentProps<SelectionInfoProvider>;
 const identity = ({ children }: SelectionInfoProviderProps) => <>{children?.({})}</>;
 
 function useSelectionMenu() {
-  const layers = useOne(slice.layers, (s) => map(s, (l) => ({ key: l.key, type: l.source?.type })));
+  // `isEqual`, deliberately: the selector allocates a fresh array of fresh
+  // objects on every commit, so without it `layers` is never referentially
+  // equal, the memo below recomputes, and it hands React a *new component type*
+  // on every playback step — which React can only honour by tearing down the
+  // whole (deeply nested, `keepMounted`) menu subtree and rebuilding it.
+  const layers = useOne(
+    slice.layers,
+    (s) => map(s, (l) => ({ key: l.key, type: l.source?.type })),
+    isEqual,
+  );
   return useMemo(
     () =>
       reduce(

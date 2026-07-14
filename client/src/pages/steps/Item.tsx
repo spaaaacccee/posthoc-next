@@ -1,5 +1,4 @@
 import { Box, Divider } from "@mui/material";
-import { WhenIdle } from "components/generic/LazyList";
 import { EventInspector, Skeleton } from "components/inspector/EventInspector";
 import { ITEM_HEIGHT } from "./constants";
 import { useItemPlaybackState } from "./useItemPlaybackState";
@@ -27,20 +26,18 @@ export function Item({
   });
   return (
     <Box sx={{ height: ITEM_HEIGHT }}>
-      <WhenIdle>
-        {playing ? (
-          <Skeleton event={event} />
-        ) : (
-          <EventInspector
-            sx={{ opacity: disabled ? 0.25 : 1 }}
-            event={event}
-            index={eventIndex}
-            selected={isSelected}
-            label={label}
-            onClick={() => stepTo(eventIndex)}
-          />
-        )}
-      </WhenIdle>
+      {playing ? (
+        <Skeleton event={event} />
+      ) : (
+        <EventInspector
+          sx={{ opacity: disabled ? 0.25 : 1 }}
+          event={event}
+          index={eventIndex}
+          selected={isSelected}
+          label={label}
+          onClick={() => stepTo(eventIndex)}
+        />
+      )}
       <Divider variant="inset" />
     </Box>
   );

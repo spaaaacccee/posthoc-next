@@ -12,7 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useCss, useToggle } from "react-use";
+import { useCss } from "react-use";
 
 // Browsers silently clamp the maximum height of a single element (Chrome
 // ~33.5M px, Firefox ~17.9M px, Safari higher). A naive virtual list sizes its
@@ -41,17 +41,6 @@ export type LazyListProps = {
   handleRef?: Ref<LazyListHandle>;
   onReady?: () => void;
 } & Omit<BoxProps, "children">;
-
-export function WhenIdle({ children }: { children: ReactElement }) {
-  const [current, toggle] = useToggle(false);
-  useEffect(() => {
-    const id = requestIdleCallback(() => toggle(true), {
-      timeout: 150,
-    });
-    return () => cancelIdleCallback(id);
-  }, [toggle]);
-  return current && children;
-}
 
 type Geometry = {
   vpH: number;
