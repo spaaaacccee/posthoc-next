@@ -22,6 +22,7 @@ import {
 import { D2V2WorkerEvents, getTiles, tileCssSize } from "./D2RendererV2Worker";
 import { D2RendererV2WorkerAdapter } from "./D2RendererV2WorkerAdapter";
 import { hash } from "./hash";
+import { TileUploadQueue } from "./TileUploadQueue";
 
 function tileHash(bounds: Bounds) {
   return hash([bounds.top, bounds.right, bounds.bottom, bounds.left]);
@@ -184,6 +185,17 @@ export class D2RendererV2 extends D2RendererBase {
   #workers: D2RendererV2WorkerAdapter[] = [];
   #step = 0;
 
+  /**
+   * The playhead, in memory the workers can read. Advancing it is one store rather
+   * than a message to each worker — see {@link setStep}. Absent when the page is
+   * not cross-origin isolated, in which case we fall back to messages.
+   */
+  #stepBuffer? = typeof SharedArrayBuffer !== "undefined" ? new SharedArrayBuffer(4) : undefined;
+  #stepView? = this.#stepBuffer ? new Int32Array(this.#stepBuffer) : undefined;
+
+  /** Tile bitmaps waiting for the GPU, bounded per frame. See {@link TileUploadQueue}. */
+  #uploads = new TileUploadQueue<ImageBitmap>(tileHash);
+
   #layers = new Map<SourceHandle, Layer>();
   /** Handles whose index worker 0 is currently packing → the store it's for. */
   #pendingIndex = new Map<SourceHandle, SharedComponentStore>();
@@ -200,6 +212,24 @@ export class D2RendererV2 extends D2RendererBase {
     this.viewport.on("mousemove", (e) => this.#queueHover(e));
     this.viewport.on("moved", () => this.#getUpdateGridQueue()());
     this.viewport.on("clicked", (e) => this.#click(e));
+    // Ahead of PIXI's own render, which the Application adds at LOW priority — so a
+    // tile drained this frame is on screen this frame.
+    this.app!.ticker.add(this.#drainUploads, this, PIXI.UPDATE_PRIORITY.NORMAL);
+  }
+
+  /**
+   * Hand this frame's share of the pending tiles to the GPU.
+   *
+   * Uploading a tile is not free — it points a texture at a new bitmap and PIXI
+   * pushes it across on the next render — and a worker fleet under load can produce
+   * a whole frustum's worth at once. Draining under a budget means the viewport
+   * falls *behind* when it cannot keep up, instead of taking the UI down with it.
+   */
+  #drainUploads() {
+    if (!this.#uploads.size) return;
+    this.#uploads.drain(this.options.maxTileUploadsPerFrame, ({ bounds, hash, bitmap }) =>
+      this.#addToWorld(bounds, hash, bitmap),
+    );
   }
 
   /**
@@ -250,6 +280,9 @@ export class D2RendererV2 extends D2RendererBase {
   destroy(): void {
     map(this.#workers, (w) => w.terminate());
     if (this.#hoverFrame !== undefined) cancelAnimationFrame(this.#hoverFrame);
+    // Before the tiles: these are bitmaps that never made it onto one, and they own
+    // off-heap pixels the collector would otherwise sit on.
+    this.#uploads.clear();
     for (const t of this.#tileIndex.values()) t.destroy();
     this.#tileIndex.clear();
     super.destroy();
@@ -288,10 +321,11 @@ export class D2RendererV2 extends D2RendererBase {
       queueMicrotask(() => this.emit("layerIndexed", id));
     }
     this.#clearResolved();
-    // Push the current frustum + step so freshly-loaded workers render the
-    // visible region immediately instead of their default 256² frustum.
+    // Push the current frustum so freshly-loaded workers render the visible region
+    // immediately instead of their default 256² frustum. The step needs no pushing
+    // when it is shared — they already read it from memory.
     this.handleFrustumChange();
-    this.#workers.forEach((w) => w.call("setStep", [this.#step]));
+    if (!this.#stepView) this.#workers.forEach((w) => w.call("setStep", [this.#step]));
     return id;
   }
 
@@ -323,9 +357,26 @@ export class D2RendererV2 extends D2RendererBase {
     for (const t of this.#tileIndex.values()) t.resolved = false;
   }
 
+  /**
+   * Advance the playhead.
+   *
+   * When the workers share a step buffer this is a single store to memory: they
+   * sample it themselves, on their own clock (see
+   * {@link D2RendererV2Worker.setStepBuffer}). Playback therefore costs the main
+   * thread *nothing* per step, and the renderer is free to skip the steps it was
+   * too slow to draw — only the latest playhead is ever visible, so an intermediate
+   * one is work nobody would have seen.
+   *
+   * Without `SharedArrayBuffer` (no cross-origin isolation) it falls back to what
+   * it did before: a message per worker per step.
+   */
   setStep(step: number): void {
     if (step === this.#step) return;
     this.#step = step;
+    if (this.#stepView) {
+      Atomics.store(this.#stepView, 0, step);
+      return;
+    }
     this.#workers.forEach((w) => w.call("setStep", [step]));
   }
 
@@ -391,6 +442,8 @@ export class D2RendererV2 extends D2RendererBase {
         throw e;
       };
       worker.call("setup", [{ ...options, workerIndex: i }]);
+      // After `setup`: the sampling interval is read from the options.
+      if (this.#stepBuffer) worker.call("setStepBuffer", [this.#stepBuffer]);
       return worker;
     });
   }
@@ -471,7 +524,17 @@ export class D2RendererV2 extends D2RendererBase {
   }
 
   #handleUpdate({ bounds, bitmap, hash: nextHash }: D2V2WorkerEvents["update"]) {
-    this.#addToWorld(bounds, nextHash, bitmap);
+    if (bitmap) {
+      // Queued, not uploaded: the GPU work is metered out over frames, and a tile
+      // re-rendered before we got to it supersedes its own predecessor.
+      this.#uploads.push(bounds, nextHash, bitmap);
+      return;
+    }
+    // A bitmap-less update means "unchanged — you already have this one". If a
+    // newer bitmap for this tile is still queued, we are about to have something
+    // strictly better, and re-requesting it would be a wasted round trip.
+    if (this.#uploads.has(bounds)) return;
+    this.#addToWorld(bounds, nextHash);
   }
 
   // Takes the raw bitmap, not a `Texture`: a tile mints its texture once, in its

@@ -694,3 +694,84 @@ describe("accumulation", () => {
     expect(onScrubBack).toBeLessThan(N / 2);
   });
 });
+
+describe("setStepBuffer", () => {
+  const buffer = () => new SharedArrayBuffer(4);
+
+  it("samples the playhead from shared memory instead of being told", () => {
+    vi.useFakeTimers();
+    try {
+      const worker = makeWorker();
+      const store = makeStore();
+      store.end.set([2, 10]); // body 0 disappears at step 2, so steps differ
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.render();
+
+      const b = buffer();
+      const view = new Int32Array(b);
+      worker.setStepBuffer(b);
+
+      const events = capture(worker);
+      // The main thread advances the playhead with a single store — no message.
+      Atomics.store(view, 0, 5);
+      vi.advanceTimersByTime(defaultD2RendererOptions.refreshInterval * 2);
+      worker.render();
+
+      expect(updates(events).some((e) => e.payload.bitmap)).toBe(true);
+      worker.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("takes the latest playhead, skipping the steps it was too slow to see", () => {
+    // The whole point of sampling: intermediate steps nobody would have looked at
+    // are simply never rendered.
+    vi.useFakeTimers();
+    try {
+      const worker = makeWorker();
+      const store = makeTraceStore(120);
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      const b = buffer();
+      const view = new Int32Array(b);
+      worker.setStepBuffer(b);
+
+      // Playback races ahead while the worker is busy...
+      for (let s = 0; s < 100; s++) Atomics.store(view, 0, s);
+
+      // ...and when it next looks, it sees only where the playhead ended up.
+      const drawnAtCatchUp = countFillRects(() => {
+        vi.advanceTimersByTime(defaultD2RendererOptions.refreshInterval);
+        worker.render();
+      });
+      // One catch-up draw of the 99 bodies now visible — not 100 renders' worth.
+      expect(drawnAtCatchUp).toBeLessThan(120 * 2);
+      worker.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does nothing while the playhead is parked", () => {
+    vi.useFakeTimers();
+    try {
+      const worker = makeWorker();
+      const store = makeStore();
+      worker.setLayer("a", { store, generation: store.generation });
+      worker.buildLayerIndex("a");
+      worker.setStepBuffer(buffer());
+      worker.render();
+
+      const events = capture(worker);
+      vi.advanceTimersByTime(defaultD2RendererOptions.refreshInterval * 10);
+      worker.render();
+      // Same content at the same step: resolved, but nothing re-rasterized.
+      expect(updates(events).every((e) => !e.payload.bitmap)).toBe(true);
+      worker.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

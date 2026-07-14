@@ -76,6 +76,19 @@ export type D2RendererOptions = RendererOptions & {
   workerCount: number;
   workerIndex: number;
   refreshInterval: number;
+  /**
+   * How many tile bitmaps may be handed to the GPU in one frame.
+   *
+   * A worker fleet under load can produce a whole frustum's worth of tiles at once,
+   * and each one costs the *main* thread a texture upload — in the same frame budget
+   * as the rest of the UI. Bounding it means a burst makes the viewport lag by a
+   * frame or two rather than making the app stutter. Zero or less drains everything,
+   * which is the old behaviour.
+   *
+   * Rarely binds in practice: with accumulating tiles only the tiles the search
+   * frontier touched are dirty on a given step, and a frontier is spatially local.
+   */
+  maxTileUploadsPerFrame: number;
   animationDuration: number;
   debounceInterval: number;
   /**
@@ -99,6 +112,7 @@ export const defaultD2RendererOptions: D2RendererOptions = {
   },
   tileSubdivision: 0,
   refreshInterval: 1000 / 24,
+  maxTileUploadsPerFrame: 8,
   animationDuration: 150,
   debounceInterval: 1000 / 24,
   // Off, so the v1 and minimal renderers keep their instant wheel step. v2 opts in

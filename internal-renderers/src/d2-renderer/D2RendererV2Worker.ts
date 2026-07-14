@@ -250,6 +250,50 @@ export class D2RendererV2Worker extends EventEmitter<
     this.#invalidate();
   }
 
+  /**
+   * Read the playhead out of shared memory, on our own clock, instead of being
+   * told about it.
+   *
+   * `setStep` is a message, and the main thread was sending one to *every* worker
+   * on *every* step — up to 720 `postMessage`s a second at 60fps across twelve
+   * workers, which measured at 7.8% of the main thread on a large trace. None of
+   * that work has anything to do with how fast a tile can actually be drawn.
+   *
+   * With the playhead in a `SharedArrayBuffer`, advancing it is a single store to
+   * memory on the main thread and costs nothing per worker. Each worker samples it
+   * at `refreshInterval` and renders if it moved — so the renderer runs at *its
+   * own* cadence and simply skips the steps it was too slow to see. That is free
+   * and correct: only the latest playhead is ever visible, so an intermediate one
+   * is work nobody would have looked at.
+   *
+   * The polling tick is an `Atomics.load` and a compare — a no-op when the playhead
+   * is parked, which is most of the time.
+   */
+  setStepBuffer(buffer: SharedArrayBuffer) {
+    this.#stepView = new Int32Array(buffer);
+    this.#sampleStep();
+    this.#stepTimer ??= setInterval(() => this.#sampleStep(), this.#options.refreshInterval);
+  }
+
+  #stepView?: Int32Array;
+  #stepTimer?: ReturnType<typeof setInterval>;
+
+  #sampleStep() {
+    const view = this.#stepView;
+    if (!view) return;
+    const step = Atomics.load(view, 0);
+    if (step === this.#step) return;
+    this.#step = step;
+    this.#invalidate(); // throttled: sampling faster than we can draw changes nothing
+  }
+
+  /** Stop sampling. The worker is normally terminated outright; this is for tests. */
+  dispose() {
+    if (this.#stepTimer !== undefined) clearInterval(this.#stepTimer);
+    this.#stepTimer = undefined;
+    this.#stepView = undefined;
+  }
+
   /** Add or replace a layer's generation. */
   setLayer(handle: string, gen: Generation, params: LayerParams = {}) {
     this.#layers.set(handle, {
