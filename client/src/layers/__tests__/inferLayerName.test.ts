@@ -54,4 +54,18 @@ describe("inferLayerName", () => {
     expect(inferLayerName()).toBe("Untitled Layer");
     expect(getController).not.toHaveBeenCalled();
   });
+
+  it("falls back to `Untitled Layer` for a source type with no registered controller", () => {
+    // `getController` is a bare lookup, so an unknown type resolves to `undefined`
+    // — and this used to throw on `handler.inferName`. A layer is enough to reach
+    // it: one saved by a newer build, or a source type since renamed. It is called
+    // from render paths (`RenderLayer`, `LayerPicker`, `ViewportPage`), so the
+    // throw took the view down rather than showing a layer with a dull name.
+    expect(inferLayerName({ key: "c", source: { type: "not-registered" } })).toBe("Untitled Layer");
+  });
+
+  it("falls back to `Untitled Layer` for a controller that infers nothing", () => {
+    vi.mocked(getController).mockReturnValue({} as unknown as LayerController<string, Source>);
+    expect(inferLayerName({ key: "d", source: { type: "trace" } })).toBe("Untitled Layer");
+  });
 });

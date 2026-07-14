@@ -45,7 +45,7 @@ describe("debounceLifo", () => {
     expect(f.mock.calls).toEqual([[3]]);
   });
 
-  it("withholds a call from the debounce while an earlier invocation is still pending", async () => {
+  it("never overlaps two invocations, however long the first one runs", async () => {
     const runs: number[] = [];
     const inFlight = deferred();
     const f = vi.fn(async (n: number) => {
@@ -57,22 +57,76 @@ describe("debounceLifo", () => {
     g(1);
     await settle();
     await vi.advanceTimersByTimeAsync(100);
+    expect(runs).toEqual([1]);
+
+    // f(1) has not settled, so nothing else may run — the whole point of this
+    // function is that two edits cannot `produce` against the same layer at once.
+    // The window can elapse many times over and f is still not called again.
     g(2);
     await settle();
-    await vi.advanceTimersByTimeAsync(100);
-    expect(runs).toEqual([1, 2]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runs).toEqual([1]);
 
-    // 1 has still not resolved, so 3 is never handed to the debounce at all:
-    // its window can elapse many times over without f running.
     g(3);
     await settle();
     await vi.advanceTimersByTimeAsync(1000);
-    expect(runs).toEqual([1, 2]);
+    expect(runs).toEqual([1]);
 
+    // Once it settles, the newest withheld args go — and only those.
     inFlight.resolve();
     await settle();
+    expect(runs).toEqual([1, 3]);
+    expect(f).not.toHaveBeenCalledWith(2);
+  });
+
+  it("settles the returned promise with the invocation the call was folded into", async () => {
+    const f = vi.fn(async (n: number) => n);
+    const g = debounceLifo(f, 100);
+
+    const done = vi.fn();
+    void g(1).then(done);
+    void g(2).then(done);
+    await settle();
+    expect(done).not.toHaveBeenCalled();
+
     await vi.advanceTimersByTimeAsync(100);
-    expect(runs).toEqual([1, 2, 3]);
+    await settle();
+    // Both callers were coalesced into the one invocation, and both settle with it.
+    expect(done).toHaveBeenCalledTimes(2);
+    expect(f.mock.calls).toEqual([[2]]);
+  });
+
+  it("rejects the returned promise when f fails, rather than leaving it unhandled", async () => {
+    const boom = new Error("save failed");
+    const g = debounceLifo(async () => {
+      throw boom;
+    }, 100);
+
+    const caught = vi.fn();
+    const p = g().catch(caught);
+    await vi.advanceTimersByTimeAsync(100);
+    await p;
+
+    expect(caught).toHaveBeenCalledWith(boom);
+  });
+
+  it("keeps running after a failed invocation", async () => {
+    const f = vi.fn(async (n: number) => {
+      if (n === 1) throw new Error("save failed");
+    });
+    const g = debounceLifo(f, 100);
+
+    await vi.advanceTimersByTimeAsync(0);
+    void g(1).catch(() => {});
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+
+    // A rejection must clear the in-flight gate, or the lane wedges for good.
+    void g(2).catch(() => {});
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+
+    expect(f.mock.calls).toEqual([[1], [2]]);
   });
 
   it("re-invokes with only the last of the calls it withheld", async () => {
