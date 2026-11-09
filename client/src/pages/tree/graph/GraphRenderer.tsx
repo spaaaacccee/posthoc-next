@@ -1,6 +1,5 @@
 import { useTheme } from "@mui/material";
 import { clamp } from "es-toolkit";
-import { floor } from "es-toolkit/compat";
 import { D2RendererV2 } from "internal-renderers/src/d2-renderer/D2RendererV2";
 import {
   defaultD2RendererOptions,
@@ -16,37 +15,40 @@ import type { GraphStoreResult } from "./buildGraphStore";
 /**
  * The graph's own renderer instance, deliberately not the viewport's.
  *
- * **Tiles subdivide harder**, and that is now the only setting that separates the
- * two — the whole reason this isn't the viewport's instance. Tiles are striped
- * across workers one-for-one, so a tile's body count *is* a worker's share of the
- * frame — and search data is heavily clustered. On a real 717k-event trace, the
- * viewport's `tileSubdivision: 2` leaves one worker holding ~32% of every frame; at
- * 3 it is 14%, at 4 it is 6%. A map's bodies are spread evenly over its grid and
- * never had this problem.
+ * Its settings match the viewport's today (see `TraceRenderer`), but they are tuned
+ * separately. Subdivision is the one to watch. Tiles are striped across workers
+ * one-for-one, so a tile's body count is a worker's share of the frame, and search
+ * data is heavily clustered. On a real 717k-event trace, `tileSubdivision: 2` leaves
+ * one worker holding ~32% of every frame; at 3 it is 14%, at 4 it is 6%. If
+ * scrubbing a large graph stalls on one worker, raise it, and lower the multiplier
+ * on `tile` to match. A map's bodies are spread evenly over its grid and don't have
+ * this problem.
  *
- * Dynamic resolution is off here too, but that is no longer a difference: the
- * viewport turned it off as well once the GPU calls were counted, so see
- * {@link DynamicResolutionOptions.enabled} rather than repeating the reasoning. The
- * short version is that a graph's tiles are cached against a content hash and stay
- * valid between ramp-bucket crossings — that cache is the entire reason a scrub is
- * cheap — and a ticker that flips tile size twice a second evicts exactly it.
+ * Dynamic resolution is off, for the same reason as the viewport: see
+ * {@link DynamicResolutionOptions.enabled}. A graph's tiles are cached against a
+ * content hash and stay valid between ramp-bucket crossings, which is what makes a
+ * scrub cheap, and a ticker that flips tile size twice a second evicts that cache.
  */
 const TILE_RESOLUTION = 128;
 
 /**
- * Tile bitmap size — and it is coupled to `tileSubdivision`, which is easy to miss.
+ * Tile bitmap size. It is coupled to `tileSubdivision`, which is easy to miss.
  *
- * A tile's bitmap is stretched over its world bounds, so the pixels-per-CSS-pixel it
- * rasterizes at is `tileResolution * 2^subdivision / paneWidth`. Subdividing harder
- * shrinks a tile's world footprint while leaving its bitmap the same size, so it
- * *doubles* the sampling density for free — and the viewport's `* 2` (which lands it
- * at ~dpr for its `tileSubdivision: 2`) becomes ~2x oversampling here at 3. That is
- * 4x the fill rate for pixels no display can show, and on the 717k-point scatter it
- * is the difference between a splat costing 29 and 225 pixels.
+ * A tile's bitmap is stretched over its world bounds, so the bitmap pixels it spends
+ * per CSS pixel are `tileResolution * 2^(subdivision + 0.5) / paneSize`, where
+ * `paneSize` is the pane's longer side. The display is sharp when that equals
+ * `devicePixelRatio`. Changing either setting changes the density, so retune the
+ * other with it.
  *
- * So the `* 2` comes off, exactly cancelling the extra subdivision.
+ * At `tileSubdivision: 2` the multiplier is 1.5, the same as the viewport. That is
+ * 1:1 with the display on a pane around 1080px. Without the multiplier, a 1440px
+ * pane renders at half the display's resolution, which is visibly blurry. At
+ * subdivision 3, a multiplier of 0.75 gives the same density; keeping 1.5 there
+ * oversamples by 2x, which is 4x the fill rate for detail no display can show.
+ *
+ * Density still scales with pane size, so a much larger pane renders softer.
  */
-const tile = devicePixelRatio * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
+const tile = devicePixelRatio * 1.5 * TILE_RESOLUTION * (isMobile ? 0.25 : 1);
 
 const rendererOptions: Partial<D2RendererOptions> = {
   tileSubdivision: 2,
