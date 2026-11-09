@@ -2,12 +2,14 @@ import { KeyboardArrowDownOutlined } from "@mui-symbols-material/w300";
 import { ModeStandbyOutlined, TimelineOutlined } from "@mui-symbols-material/w300";
 import { Checkbox, Collapse, IconButton, Stack, SxProps, Theme, Typography } from "@mui/material";
 import { FeaturePicker } from "components/app-bar/FeaturePicker";
+import { Scroll } from "components/generic/Scrollbars";
 import { Heading, Option } from "components/layer-editor/Option";
-import { map, startCase, toPairs as entries } from "es-toolkit/compat";
+import { isEmpty, map, startCase, toPairs as entries } from "es-toolkit/compat";
 import { useState } from "react";
 import { useAcrylic, usePaper } from "theme";
 import { SharedGraphProps } from "./SharedGraphProps";
 import { useComputeLabels, useComputeTypes } from "./TreeUtility";
+import { useHighlighting } from "./useHighlighting";
 import { TreeOptions } from "./useTreeOptions";
 
 const CLEAN_CHECKBOX_SX: SxProps<Theme> = {
@@ -73,6 +75,7 @@ export const layoutModes = {
 };
 
 export function ScatterPlotControls({
+  layer,
   trackedProperty,
   trace,
   traceKey,
@@ -106,10 +109,26 @@ export function ScatterPlotControls({
   ];
   const paper = usePaper();
   const acrylic = useAcrylic();
+  const highlighting = useHighlighting(layer);
+  // The page toolbar overlays the top of the graph, and so does the focused-view
+  // banner below it while a highlight is on. GraphControls clears the same height.
+  const overlay = isEmpty(highlighting) ? 6 : 11;
   return (
-    <Stack sx={{ p: 2, position: "absolute", bottom: 0, right: 0 }}>
-      <Stack sx={{ minWidth: 300, px: 2, py: 1, ...acrylic, ...paper(1) }}>
-        <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Stack
+      sx={{
+        p: 2,
+        position: "absolute",
+        bottom: 0,
+        right: 0,
+        maxHeight: (t) => `calc(100% - ${t.spacing(overlay)})`,
+        transition: (t) => t.transitions.create("max-height"),
+      }}
+    >
+      <Stack sx={{ minWidth: 300, minHeight: 0, pt: 1, ...acrylic, ...paper(1) }}>
+        <Stack
+          direction="row"
+          sx={{ px: 2, flexShrink: 0, justifyContent: "space-between", alignItems: "center" }}
+        >
           <Typography>Display Options</Typography>
           <IconButton
             edge="end"
@@ -128,137 +147,143 @@ export function ScatterPlotControls({
             }
           </IconButton>
         </Stack>
-        <Option
-          label="Layout"
-          content={
-            <FeaturePicker
-              paper
-              icon={<ModeStandbyOutlined />}
+        <Scroll y px={0} style={{ height: "auto", minHeight: 0 }}>
+          <Stack sx={{ px: 2, pb: 1 }}>
+            <Option
               label="Layout"
-              value={mode}
-              items={map(entries(layoutModes), ([k, v]) => ({ id: k, ...v }))}
-              onChange={(e) => setMode(e as keyof typeof layoutModes)}
-              arrow
+              content={
+                <FeaturePicker
+                  paper
+                  icon={<ModeStandbyOutlined />}
+                  label="Layout"
+                  value={mode}
+                  items={map(entries(layoutModes), ([k, v]) => ({ id: k, ...v }))}
+                  onChange={(e) => setMode(e as keyof typeof layoutModes)}
+                  arrow
+                />
+              }
             />
-          }
-        />
-        <Option
-          label="Colouring"
-          content={
-            <FeaturePicker
-              paper
-              icon={<TimelineOutlined />}
+            <Option
               label="Colouring"
-              value={trackedProperty}
-              items={[
-                { id: "", name: "Event Type" },
-                ...map(entries(properties), ([k, v]) => ({
-                  id: k,
-                  name: `$${k}`,
-                  description: v.type,
-                })),
-              ]}
-              onChange={setTrackedProperty}
-              arrow
-            />
-          }
-        />
-        <Collapse in={open}>
-          <Stack>
-            <Heading label="Plot Options" />
-            <Option
-              label="X axis"
               content={
                 <FeaturePicker
                   paper
-                  disabled={mode !== "plot"}
-                  label={axis.xMetric ? `$.${axis.xMetric}` : "Auto"}
-                  value={axis.xMetric}
-                  items={scatterPlotAxis}
-                  onChange={setAxis("xMetric")}
-                  arrow
-                  itemOrientation="horizontal"
-                />
-              }
-            />
-            <Option
-              label="Y axis"
-              content={
-                <FeaturePicker
-                  paper
-                  disabled={mode !== "plot"}
-                  label={axis.yMetric ? `$.${axis.yMetric}` : "Auto"}
-                  value={axis.yMetric}
-                  items={scatterPlotAxis}
-                  onChange={setAxis("yMetric")}
-                  arrow
-                  itemOrientation="horizontal"
-                />
-              }
-            />
-            <Option
-              label="Logarithmic X axis"
-              content={
-                <Checkbox
-                  disabled={mode !== "plot"}
-                  size="small"
-                  checked={logAxis.x}
-                  onChange={(e) => setLogAxis((prev) => ({ ...prev, x: e.target.checked }))}
-                  sx={CLEAN_CHECKBOX_SX}
-                />
-              }
-            />
-            <Option
-              label="Logarithmic Y axis"
-              content={
-                <Checkbox
-                  size="small"
-                  disabled={mode !== "plot"}
-                  checked={logAxis.y}
-                  onChange={(e) => setLogAxis((prev) => ({ ...prev, y: e.target.checked }))}
-                  sx={CLEAN_CHECKBOX_SX}
-                />
-              }
-            />
-            <Heading label="Filtering" />
-            <Option
-              label="Event type"
-              content={
-                <FeaturePicker
-                  paper
-                  disabled={mode !== "plot"}
-                  ButtonProps={{ fullWidth: true }}
-                  label={typeFilter ? `Event: ${startCase(typeFilter)}` : "Event type"}
-                  value={typeFilter}
+                  icon={<TimelineOutlined />}
+                  label="Colouring"
+                  value={trackedProperty}
                   items={[
-                    { id: "", name: "All Events" },
-                    ...types.map((t) => ({ id: t, name: startCase(t) })),
+                    { id: "", name: "Event Type" },
+                    ...map(entries(properties), ([k, v]) => ({
+                      id: k,
+                      name: `$${k}`,
+                      description: v.type,
+                    })),
                   ]}
-                  onChange={setTypeFilter}
+                  onChange={setTrackedProperty}
                   arrow
-                  itemOrientation="horizontal"
                 />
               }
             />
-            <Heading label="Grouping" />
-            <Option
-              label="Group by"
-              content={
-                <FeaturePicker
-                  paper
-                  disabled={mode !== "plot"}
-                  ButtonProps={{ fullWidth: true }}
-                  label={groupByAttribute ? `Group by: ${startCase(groupByAttribute)}` : "Group by"}
-                  value={groupByAttribute}
-                  items={GROUP_BY_OPTIONS}
-                  onChange={setGroupByAttribute}
-                  arrow
-                  itemOrientation="horizontal"
+            <Collapse in={open}>
+              <Stack>
+                <Heading label="Plot Options" />
+                <Option
+                  label="X axis"
+                  content={
+                    <FeaturePicker
+                      paper
+                      disabled={mode !== "plot"}
+                      label={axis.xMetric ? `$.${axis.xMetric}` : "Auto"}
+                      value={axis.xMetric}
+                      items={scatterPlotAxis}
+                      onChange={setAxis("xMetric")}
+                      arrow
+                      itemOrientation="horizontal"
+                    />
+                  }
                 />
-              }
-            />
+                <Option
+                  label="Y axis"
+                  content={
+                    <FeaturePicker
+                      paper
+                      disabled={mode !== "plot"}
+                      label={axis.yMetric ? `$.${axis.yMetric}` : "Auto"}
+                      value={axis.yMetric}
+                      items={scatterPlotAxis}
+                      onChange={setAxis("yMetric")}
+                      arrow
+                      itemOrientation="horizontal"
+                    />
+                  }
+                />
+                <Option
+                  label="Logarithmic X axis"
+                  content={
+                    <Checkbox
+                      disabled={mode !== "plot"}
+                      size="small"
+                      checked={logAxis.x}
+                      onChange={(e) => setLogAxis((prev) => ({ ...prev, x: e.target.checked }))}
+                      sx={CLEAN_CHECKBOX_SX}
+                    />
+                  }
+                />
+                <Option
+                  label="Logarithmic Y axis"
+                  content={
+                    <Checkbox
+                      size="small"
+                      disabled={mode !== "plot"}
+                      checked={logAxis.y}
+                      onChange={(e) => setLogAxis((prev) => ({ ...prev, y: e.target.checked }))}
+                      sx={CLEAN_CHECKBOX_SX}
+                    />
+                  }
+                />
+                <Heading label="Filtering" />
+                <Option
+                  label="Event type"
+                  content={
+                    <FeaturePicker
+                      paper
+                      disabled={mode !== "plot"}
+                      ButtonProps={{ fullWidth: true }}
+                      label={typeFilter ? `Event: ${startCase(typeFilter)}` : "Event type"}
+                      value={typeFilter}
+                      items={[
+                        { id: "", name: "All Events" },
+                        ...types.map((t) => ({ id: t, name: startCase(t) })),
+                      ]}
+                      onChange={setTypeFilter}
+                      arrow
+                      itemOrientation="horizontal"
+                    />
+                  }
+                />
+                <Heading label="Grouping" />
+                <Option
+                  label="Group by"
+                  content={
+                    <FeaturePicker
+                      paper
+                      disabled={mode !== "plot"}
+                      ButtonProps={{ fullWidth: true }}
+                      label={
+                        groupByAttribute ? `Group by: ${startCase(groupByAttribute)}` : "Group by"
+                      }
+                      value={groupByAttribute}
+                      items={GROUP_BY_OPTIONS}
+                      onChange={setGroupByAttribute}
+                      arrow
+                      itemOrientation="horizontal"
+                    />
+                  }
+                />
+              </Stack>
+            </Collapse>
           </Stack>
-        </Collapse>
+        </Scroll>
       </Stack>
     </Stack>
   );
